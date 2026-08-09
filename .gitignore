@@ -1,0 +1,27 @@
+# PowerShell
+*.ps1xml
+*.psd1
+
+# Azure credentials - NEVER commit these
+*.json.bak
+local.settings.json
+appsettings.local.json
+
+# Workspace keys and secrets
+*secrets*
+*credentials*
+*password*
+*.key
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Logs
+*.log
+*.tmp
