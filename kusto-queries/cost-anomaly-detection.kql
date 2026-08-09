@@ -1,0 +1,50 @@
+// ============================================
+// Query 1: Data Verification
+// Confirms synthetic cost data landed correctly
+// ============================================
+AzureCostData_CL
+| count
+
+// ============================================
+// Query 2: Cost Anomaly Detection
+// Detects resource types with costs 30% above
+// historical baseline on anomaly days
+// Business value: Identifies bill shock sources
+// immediately instead of waiting for month end
+// ============================================
+let CostBaseline =
+    AzureCostData_CL
+    | where IsAnomaly_b == false
+    | summarize AvgDailyResourceCost = sum(DailyCost_d) / 29 by ResourceType;
+//
+AzureCostData_CL
+| where IsAnomaly_b == true
+| summarize TodayCost = sum(DailyCost_d) by ResourceType, ResourceGroup
+| join kind=inner CostBaseline on ResourceType
+| extend CostIncrease = TodayCost - AvgDailyResourceCost
+| extend PercentageIncrease = round((CostIncrease / AvgDailyResourceCost) * 100, 2)
+| where PercentageIncrease > 30 and CostIncrease > 5
+| order by CostIncrease desc
+| project ResourceGroup, ResourceType, TodayCost, AvgDailyResourceCost, CostIncrease, PercentageIncrease
+
+// ============================================
+// Query 3: Daily Spend Trend
+// Shows 30 days of total daily costs with
+// spike days highlighted
+// Business value: Visual trend for management
+// dashboard and finance reporting
+// ============================================
+let CostBaseline =
+    AzureCostData_CL
+    | where IsAnomaly_b == false
+    | where TimeGenerated > ago(30d)
+    | summarize AvgDailyCost = sum(DailyCost_d) / 29;
+//
+AzureCostData_CL
+| where TimeGenerated > ago(30d)
+| summarize TotalDailyCost = sum(DailyCost_d) by Date_s, IsAnomaly_b
+| extend Baseline = toscalar(CostBaseline)
+| extend Status = iff(IsAnomaly_b == true, "⚠️ Anomaly", "Normal")
+| extend PercentageVsBaseline = round(((TotalDailyCost - Baseline) / Baseline) * 100, 2)
+| order by Date_s asc
+| project Date_s, TotalDailyCost, Baseline, Status, PercentageVsBaseline
