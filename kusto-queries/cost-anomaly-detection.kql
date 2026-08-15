@@ -6,26 +6,41 @@ AzureCostData_CL
 | count
 
 // ============================================
-// Query 2: Cost Anomaly Detection
-// Detects resource types with costs 30% above
-// historical baseline on anomaly days
-// Business value: Identifies bill shock sources
-// immediately instead of waiting for month end
-// ============================================
+// Query 2
+let CostThresholdPct = 30;
+let CostThresholdAbs = 5.0;
+//
 let CostBaseline =
     AzureCostData_CL
     | where IsAnomaly_b == false
-    | summarize AvgDailyResourceCost = sum(DailyCost_d) / 29 by ResourceType;
+    | summarize
+        AvgDailyResourceCost = round(sum(DailyCost_d) / 29, 2),
+        StdDev = stdev(DailyCost_d)
+        by ResourceType, ResourceGroup
+    | where isnotempty(ResourceGroup);
 //
 AzureCostData_CL
 | where IsAnomaly_b == true
-| summarize TodayCost = sum(DailyCost_d) by ResourceType, ResourceGroup
-| join kind=inner CostBaseline on ResourceType
-| extend CostIncrease = TodayCost - AvgDailyResourceCost
+| summarize
+    TodayCost = round(sum(DailyCost_d), 2),
+    RecordCount = count()
+    by ResourceType, ResourceGroup
+| join kind=inner CostBaseline on ResourceType, ResourceGroup
+| extend CostIncrease = round(TodayCost - AvgDailyResourceCost, 2)
 | extend PercentageIncrease = round((CostIncrease / AvgDailyResourceCost) * 100, 2)
-| where PercentageIncrease > 30 and CostIncrease > 5
+| extend DeviationsFromNormal = round(CostIncrease / StdDev, 2)
+| where PercentageIncrease > CostThresholdPct
+    and CostIncrease > CostThresholdAbs
 | order by CostIncrease desc
-| project ResourceGroup, ResourceType, TodayCost, AvgDailyResourceCost, CostIncrease, PercentageIncrease
+| project
+    ResourceGroup,
+    ResourceType,
+    TodayCost,
+    AvgDailyResourceCost,
+    CostIncrease,
+    PercentageIncrease,
+    DeviationsFromNormal,
+    RecordCount
 
 // ============================================
 // Query 3: Daily Spend Trend

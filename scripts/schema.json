@@ -1,0 +1,15 @@
+{
+    "columns": [
+        {"name": "TimeGenerated", "type": "datetime"},
+        {"name": "Date", "type": "string"},
+        {"name": "DeviceName", "type": "string"},
+        {"name": "UserName", "type": "string"},
+        {"name": "Department", "type": "string"},
+        {"name": "OperatingSystem", "type": "string"},
+        {"name": "PolicyName", "type": "string"},
+        {"name": "ComplianceStatus", "type": "string"},
+        {"name": "IsCompliant", "type": "boolean"},
+        {"name": "IsComplianceDrift", "type": "boolean"},
+        {"name": "ResourceGroup", "type": "string"}
+    ]
+}
