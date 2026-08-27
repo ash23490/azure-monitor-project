@@ -1,1 +1,148 @@
-Connect-AzAccount -DeviceCode
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "workspaceName": {
+      "type": "string",
+      "defaultValue": "azure-monitor-law",
+      "metadata": {
+        "description": "Name of the Log Analytics Workspace"
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "defaultValue": "stomonitorproject",
+      "metadata": {
+        "description": "Name of the Storage Account"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "canadacentral",
+      "metadata": {
+        "description": "Location for all resources"
+      }
+    },
+    "alertEmailAddress": {
+      "type": "string",
+      "defaultValue": "ashiramir2002@gmail.com",
+      "metadata": {
+        "description": "Email address for alert notifications"
+      }
+    },
+    "retentionInDays": {
+      "type": "int",
+      "defaultValue": 30,
+      "metadata": {
+        "description": "Log Analytics data retention in days"
+      }
+    }
+  },
+  "variables": {
+    "actionGroupName": "ag-cost-anomaly-alerts",
+    "alertRuleName": "alert-cost-anomaly-detected",
+    "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2022-10-01",
+      "name": "[parameters('workspaceName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": "[parameters('retentionInDays')]",
+        "publicNetworkAccessForIngestion": "Enabled",
+        "publicNetworkAccessForQuery": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2022-09-01",
+      "name": "[parameters('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2",
+      "properties": {
+        "accessTier": "Hot",
+        "supportsHttpsTrafficOnly": true,
+        "minimumTlsVersion": "TLS1_2"
+      }
+    },
+    {
+      "type": "microsoft.insights/actionGroups",
+      "apiVersion": "2023-01-01",
+      "name": "[variables('actionGroupName')]",
+      "location": "global",
+      "properties": {
+        "groupShortName": "CostAlerts",
+        "enabled": true,
+        "emailReceivers": [
+          {
+            "name": "email-cost-alert",
+            "emailAddress": "[parameters('alertEmailAddress')]",
+            "useCommonAlertSchema": true
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Insights/scheduledQueryRules",
+      "apiVersion": "2022-06-15",
+      "name": "[variables('alertRuleName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[variables('workspaceId')]",
+        "[resourceId('microsoft.insights/actionGroups', variables('actionGroupName'))]"
+      ],
+      "properties": {
+        "displayName": "Cost Anomaly Detected",
+        "description": "Fires when Azure resource costs spike 30% above historical baseline",
+        "severity": 2,
+        "enabled": true,
+        "evaluationFrequency": "PT5M",
+        "windowSize": "PT5M",
+        "scopes": [
+          "[variables('workspaceId')]"
+        ],
+        "criteria": {
+          "allOf": [
+            {
+              "query": "let CostThresholdPct = 30;\nlet CostThresholdAbs = 5.0;\nlet CostBaseline =\n    AzureCostData_CL\n    | where IsAnomaly_b == false\n    | summarize\n        AvgDailyResourceCost = round(sum(DailyCost_d) / 29, 2),\n        StdDev = stdev(DailyCost_d)\n        by ResourceType, ResourceGroup\n    | where isnotempty(ResourceGroup);\nAzureCostData_CL\n| where IsAnomaly_b == true\n| summarize\n    TodayCost = round(sum(DailyCost_d), 2),\n    RecordCount = count()\n    by ResourceType, ResourceGroup\n| join kind=inner CostBaseline on ResourceType, ResourceGroup\n| extend CostIncrease = round(TodayCost - AvgDailyResourceCost, 2)\n| extend PercentageIncrease = round((CostIncrease / AvgDailyResourceCost) * 100, 2)\n| extend DeviationsFromNormal = round(CostIncrease / StdDev, 2)\n| where PercentageIncrease > CostThresholdPct and CostIncrease > CostThresholdAbs\n| order by CostIncrease desc\n| project ResourceGroup, ResourceType, TodayCost, AvgDailyResourceCost, CostIncrease, PercentageIncrease, DeviationsFromNormal, RecordCount",
+              "timeAggregation": "Count",
+              "operator": "GreaterThan",
+              "threshold": 0,
+              "failingPeriods": {
+                "numberOfEvaluationPeriods": 1,
+                "minFailingPeriodsToAlert": 1
+              }
+            }
+          ]
+        },
+        "actions": {
+          "actionGroups": [
+            "[resourceId('microsoft.insights/actionGroups', variables('actionGroupName'))]"
+          ]
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "workspaceId": {
+      "type": "string",
+      "value": "[variables('workspaceId')]"
+    },
+    "workspaceName": {
+      "type": "string",
+      "value": "[parameters('workspaceName')]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "value": "[parameters('storageAccountName')]"
+    }
+  }
+}
