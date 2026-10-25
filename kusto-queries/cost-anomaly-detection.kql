@@ -63,3 +63,171 @@ AzureCostData_CL
 | extend PercentageVsBaseline = round(((TotalDailyCost - Baseline) / Baseline) * 100, 2)
 | order by Date_s asc
 | project Date_s, TotalDailyCost, Baseline, Status, PercentageVsBaseline
+
+// ============================================
+// Query 4: Top Spending Resources Ranking
+// Ranks every resource by total spend over
+// 30 days and flags the most expensive ones
+// Business value: Tells ops team exactly where
+// to cut costs and which resources to review
+// ============================================
+AzureCostData_CL
+| where TimeGenerated > ago(30d)
+| summarize 
+    TotalCost = sum(DailyCost_d),
+    AvgDailyCost = round(avg(DailyCost_d), 2),
+    MaxDailyCost = round(max(DailyCost_d), 2),
+    DaysActive = dcount(Date_s)
+    by ResourceName_s, ResourceType
+| extend MonthlyCostProjection = round(AvgDailyCost * 30, 2)
+| | extend CostRating = case(
+    AvgDailyCost > 50, "🔴 High",
+    AvgDailyCost > 20, "🟡 Medium",
+    "🟢 Low")
+| order by TotalCost desc
+| project ResourceName_s, ResourceType, TotalCost, AvgDailyCost, MaxDailyCost, MonthlyCostProjection, DaysActive, CostRating
+
+// ============================================
+// Query 5: Off-Hours Admin Activity Detection
+// Detects admin actions outside business hours
+// Business hours defined as 8am-6pm Mon-Fri
+// Business value: Catches suspicious changes
+// made outside normal working hours
+// ============================================
+AzureActivity
+| where TimeGenerated > ago(30d)
+| extend HourOfDay = datetime_part("hour", TimeGenerated)
+| extend DayOfWeek = dayofweek(TimeGenerated)
+| extend IsOffHours = iff(
+    HourOfDay < 8 or HourOfDay > 18 or
+    DayOfWeek == 0d or DayOfWeek == 6d,
+    true, false)
+| where IsOffHours == true
+| where ActivityStatusValue == "Success"
+| where CategoryValue == "Administrative"
+| summarize
+    ActionCount = count(),
+    Actions = make_set(OperationNameValue)
+    by Caller, ResourceGroup, bin(TimeGenerated, 1h)
+| order by TimeGenerated desc
+| project
+    TimeGenerated,
+    Caller,
+    ResourceGroup,
+    ActionCount,
+    Actions
+
+// ============================================
+// Query 6: Non-Compliant Devices by Department
+// Identifies which departments have the most
+// compliance violations
+// Business value: Target remediation efforts
+// ============================================
+IntuneCompliance_CL
+| where IsCompliant_b == false
+| summarize
+    ViolationCount = count(),
+    AffectedDevices = dcount(DeviceName_s),
+    FailedPolicies = make_set(PolicyName_s)
+    by Department_s, OperatingSystem_s
+| order by ViolationCount desc
+| project Department_s, OperatingSystem_s, ViolationCount, AffectedDevices, FailedPolicies
+
+
+// ============================================
+// Query 7: Non-Compliant Devices by Department
+// Identifies which departments have the most
+// compliance violations
+// Business value: Target remediation efforts
+// ============================================
+IntuneComplianceData_CL
+| where TimeGenerated > ago(30d)
+| where IsCompliant_b == false
+| summarize
+    ViolationCount = count(),
+    AffectedDevices = dcount(DeviceName_s),
+    FailedPolicies = make_set(PolicyName_s)
+    by Department_s, OperatingSystem_s
+| order by ViolationCount desc
+| project Department_s, OperatingSystem_s, ViolationCount, AffectedDevices, FailedPolicies
+
+// ============================================
+// Query 8: Compliance Drift Detection
+// Catches sudden drops in compliance
+// Business value: Early warning for
+// policy failures or device issues
+// ============================================
+IntuneComplianceData_CL
+| where TimeGenerated > ago(30d)
+| where IsComplianceDrift_b == true
+| summarize
+    DriftCount = count(),
+    AffectedDevices = make_set(DeviceName_s),
+    AffectedUsers = make_set(UserName_s)
+    by Date_s, Department_s, PolicyName_s
+| order by Date_s desc
+| project Date_s, Department_s, PolicyName_s, DriftCount, AffectedDevices, AffectedUsers
+
+// ============================================
+// Query 9: AKS Pod Health Status
+// Shows all pods and their current status
+// Business value: Immediate visibility into
+// container failures and restarts
+// ============================================
+KubePodInventory
+| where TimeGenerated > ago(1h)
+| summarize
+    TotalPods = dcount(Name),
+    RunningPods = dcountif(Name, PodStatus == "Running"),
+    FailedPods = dcountif(Name, PodStatus == "Failed"),
+    PendingPods = dcountif(Name, PodStatus == "Pending")
+    by ClusterName, Namespace
+| extend HealthScore = round((todouble(RunningPods) / todouble(TotalPods)) * 100, 2)
+| project ClusterName, Namespace, TotalPods, RunningPods, FailedPods, PendingPods, HealthScore
+
+// ============================================
+// Query 10: Node Health Status
+// Shows resource utilization per node
+// Business value: Catch resource exhaustion
+// before it causes pod failures
+// ============================================
+KubeNodeInventory
+| where TimeGenerated > ago(1h)
+| summarize
+    TotalNodes = dcount(Computer),
+    ReadyNodes = dcountif(Computer, Status contains "Ready")
+    by ClusterName
+| extend NodeHealthPct = round((todouble(ReadyNodes) / todouble(TotalNodes)) * 100, 2)
+| project ClusterName, TotalNodes, ReadyNodes, NodeHealthPct
+
+// ============================================
+// Query 11: Container Restart Detection
+// Detects containers restarting frequently
+// Business value: Early warning for app
+// crashes before they become outages
+// ============================================
+KubePodInventory
+| where TimeGenerated > ago(7d)
+| where ContainerRestartCount > 0
+| summarize
+    TotalRestarts = sum(ContainerRestartCount),
+    AffectedPods = dcount(Name)
+    by ClusterName, Namespace, ContainerName
+| order by TotalRestarts desc
+| project ClusterName, Namespace, ContainerName, TotalRestarts, AffectedPods
+
+// ============================================
+// Query 12: AKS Cost Attribution
+// Shows which namespaces consume most resources
+// Business value: Chargeback reporting and
+// cost optimization per team/workload
+// ============================================
+KubePodInventory
+| where TimeGenerated > ago(24h)
+| summarize
+    PodCount = dcount(Name),
+    ContainerCount = dcount(ContainerName)
+    by ClusterName, Namespace
+| extend ResourceScore = PodCount * ContainerCount
+| order by ResourceScore desc
+| project ClusterName, Namespace, PodCount, ContainerCount, ResourceScore
