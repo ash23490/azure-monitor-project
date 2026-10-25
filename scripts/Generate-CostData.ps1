@@ -1,131 +1,87 @@
-# ============================================
 # Generate-CostData.ps1
-# Generates synthetic Azure cost data and
-# pushes it to Log Analytics Workspace
-# ============================================
-
-# ---- CONFIGURATION ---- #
-$WorkspaceId = "56534bda-6d47-43e0-9a84-a17d8d0ada9e"
-$WorkspaceKey = "L1cFYS7Qe4ipYy7l/IMZ4h2OJ9HBeNu0+XE4h5GyPiy4QjlC10oK+OPZqbwgC02GAur3oeFIXYKgQPGu/HpCBw=="
-$LogType = "AzureCostData"
-$DaysToGenerate = 30
-
-# ---- RESOURCE TYPES TO SIMULATE ---- #
-$Resources = @(
-    @{ Name = "vm-prod-001";        Type = "Virtual Machine";    BaseCost = 45.00  },
-    @{ Name = "vm-prod-002";        Type = "Virtual Machine";    BaseCost = 45.00  },
-    @{ Name = "sql-prod-db";        Type = "SQL Database";       BaseCost = 30.00  },
-    @{ Name = "stmonitorproject";   Type = "Storage Account";    BaseCost = 2.00   },
-    @{ Name = "law-monitor-project";Type = "Log Analytics";      BaseCost = 5.00   },
-    @{ Name = "app-service-prod";   Type = "App Service";        BaseCost = 20.00  },
-    @{ Name = "vnet-prod-001";      Type = "Virtual Network";    BaseCost = 1.00   }
+# Synthetic lab data, sent via Azure Monitor Logs Ingestion API (OAuth).
+# NO workspace shared keys; rotate/remove any previously committed keys!
+# Requires: PowerShell 7+, Azure CLI login, configured DCR/DCE, RBAC.
+# The DCR stream must accept the fields below and map them into AzureCostData_CL.
+[CmdletBinding()]
+param(
+    [ValidateRange(7,365)][int]$DaysToGenerate = 30,
+    [ValidateRange(1,1000)][int]$BatchSize = 100,
+    [switch]$Send
 )
+$ErrorActionPreference = 'Stop'
 
-# ---- FUNCTION TO BUILD SIGNATURE ---- #
-Function Build-Signature {
-    param(
-        [string]$WorkspaceId,
-        [string]$WorkspaceKey,
-        [string]$Date,
-        [int]$ContentLength,
-        [string]$Method,
-        [string]$ContentType,
-        [string]$Resource
-    )
-
-    $xHeaders       = "x-ms-date:" + $Date
-    $stringToHash   = $Method + "`n" + $ContentLength + "`n" + $ContentType + "`n" + $xHeaders + "`n" + $Resource
-    $bytesToHash    = [Text.Encoding]::UTF8.GetBytes($stringToHash)
-    $keyBytes       = [Convert]::FromBase64String($WorkspaceKey)
-    $sha256         = New-Object System.Security.Cryptography.HMACSHA256
-    $sha256.Key     = $keyBytes
-    $calculatedHash = $sha256.ComputeHash($bytesToHash)
-    $encodedHash    = [Convert]::ToBase64String($calculatedHash)
-    $authorization  = 'SharedKey {0}:{1}' -f $WorkspaceId, $encodedHash
-    return $authorization
-}
-
-# ---- FUNCTION TO SEND DATA TO LOG ANALYTICS ---- #
-Function Send-LogAnalyticsData {
-    param(
-        [string]$WorkspaceId,
-        [string]$WorkspaceKey,
-        [string]$Body,
-        [string]$LogType
-    )
-
-    $method         = "POST"
-    $contentType    = "application/json"
-    $resource       = "/api/logs"
-    $rfc1123date    = [DateTime]::UtcNow.ToString("r")
-    $contentLength  = $Body.Length
-    $signature      = Build-Signature `
-                        -WorkspaceId $WorkspaceId `
-                        -WorkspaceKey $WorkspaceKey `
-                        -Date $rfc1123date `
-                        -ContentLength $contentLength `
-                        -Method $method `
-                        -ContentType $contentType `
-                        -Resource $resource
-
-    $uri     = "https://" + $WorkspaceId + ".ods.opinsights.azure.com" + $resource + "?api-version=2016-04-01"
-    $headers = @{
-        "Authorization" = $signature
-        "Log-Type"      = $LogType
-        "x-ms-date"     = $rfc1123date
-    }
-
-    $response = Invoke-WebRequest -Uri $uri -Method $method -ContentType $contentType -Headers $headers -Body $Body
-    return $response.StatusCode
-}
-
-# ---- GENERATE SYNTHETIC COST DATA ---- #
-Write-Host "Generating $DaysToGenerate days of synthetic cost data..." -ForegroundColor Cyan
-
-$CostRecords = @()
-$StartDate   = (Get-Date).AddDays(-$DaysToGenerate)
-
-for ($i = 0; $i -lt $DaysToGenerate; $i++) {
-    $CurrentDate = $StartDate.AddDays($i)
-
-    foreach ($Resource in $Resources) {
-        # Add random variance to base cost
-        $Variance    = Get-Random -Minimum -5 -Maximum 15
-        $DailyCost   = [Math]::Round($Resource.BaseCost + $Variance, 2)
-
-        # Simulate a cost spike on day 20
-        if ($i -eq 20) {
-            $DailyCost = [Math]::Round($DailyCost * 2.5, 2)
-            $IsAnomaly = $true
-        } else {
-            $IsAnomaly = $false
-        }
-
-        $CostRecords += [PSCustomObject]@{
-            Date             = $CurrentDate.ToString("yyyy-MM-dd")
-            ResourceName     = $Resource.Name
-            ResourceType     = $Resource.Type
-            DailyCost        = $DailyCost
-            Currency         = "CAD"
-            ResourceGroup    = "rg-azure-monitor-project"
-            IsAnomaly        = $IsAnomaly
-            SubscriptionName = "Free Subscription"
-        }
+$resources = @(
+    @{ Name='vm-prod-001';         Type='Virtual Machine'; BaseCost=45.00 },
+    @{ Name='vm-prod-002';         Type='Virtual Machine'; BaseCost=45.00 },
+    @{ Name='sql-prod-db';         Type='SQL Database';    BaseCost=30.00 },
+    @{ Name='stmonitorproject';    Type='Storage Account'; BaseCost=2.00 },
+    @{ Name='law-monitor-project'; Type='Log Analytics';   BaseCost=5.00 },
+    @{ Name='app-service-prod';    Type='App Service';     BaseCost=20.00 },
+    @{ Name='vnet-prod-001';       Type='Virtual Network'; BaseCost=1.00 }
+)
+$records = [System.Collections.Generic.List[object]]::new()
+$today = [DateTime]::UtcNow.Date
+for ($dayOffset = $DaysToGenerate - 1; $dayOffset -ge 0; $dayOffset--) {
+    $day = $today.AddDays(-$dayOffset)
+    foreach ($resource in $resources) {
+        $variance = Get-Random -Minimum -5 -Maximum 15
+        $amount = [Math]::Max(0, [double]$resource.BaseCost + $variance)
+        # Spike 9 days ago so historical detection must find it on its own.
+        $testSpike = $dayOffset -eq 9
+        if ($testSpike) { $amount *= 2.5 }
+        $records.Add([PSCustomObject]@{
+            TimeGenerated = $day.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            Date = $day.ToString("yyyy-MM-dd")
+            ResourceName = $resource.Name
+            ResourceType = $resource.Type
+            DailyCost = [Math]::Round($amount, 2)
+            Currency = 'CAD'
+            ResourceGroup = 'rg-azure-monitor-project'
+            IsAnomaly = $testSpike  # ground truth for tests; detection MUST ignore it
+            SubscriptionName = 'Synthetic Demo'
+        })
     }
 }
-
-# ---- SEND DATA TO LOG ANALYTICS ---- #
-Write-Host "Sending data to Log Analytics..." -ForegroundColor Cyan
-
-$Body       = $CostRecords | ConvertTo-Json
-$StatusCode = Send-LogAnalyticsData `
-                -WorkspaceId $WorkspaceId `
-                -WorkspaceKey $WorkspaceKey `
-                -Body $Body `
-                -LogType $LogType
-
-if ($StatusCode -eq 200) {
-    Write-Host "Success! $($CostRecords.Count) records sent to Log Analytics." -ForegroundColor Green
-} else {
-    Write-Host "Something went wrong. Status code: $StatusCode" -ForegroundColor Red
+Write-Host "Generated $($records.Count) synthetic cost observations." -ForegroundColor Cyan
+if (-not $Send) {
+    Write-Host "DRY RUN: no Azure ingestion. Re-run with -Send after configuring DCR/DCE." -ForegroundColor Yellow
+    return
 }
+
+$dce = $env:AZURE_DCE_URI
+$dcr = $env:AZURE_DCR_IMMUTABLE_ID
+$stream = if ($env:AZURE_COST_STREAM_NAME) { $env:AZURE_COST_STREAM_NAME } else { 'Custom-AzureCostData' }
+if ([string]::IsNullOrWhiteSpace($dce) -or [string]::IsNullOrWhiteSpace($dcr)) {
+    throw "Set AZURE_DCE_URI and AZURE_DCR_IMMUTABLE_ID first."
+}
+if ($dce -notmatch '^https://[a-zA-Z0-9.-]+/?$') {
+    throw "AZURE_DCE_URI must be an HTTPS endpoint without a path (optional trailing slash)."
+}
+if ($dcr -notmatch '^dcr-[a-zA-Z0-9-]+$') {
+    throw "Invalid DCR immutable ID; expected dcr-..."
+}
+if ($stream -notmatch '^[a-zA-Z0-9_-]+$') {
+    throw "Invalid stream name."
+}
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+    throw "Azure CLI (az) is required. Run az login before -Send."
+}
+$token = (& az account get-access-token --resource 'https://monitor.azure.com/' --query accessToken -o tsv)
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
+    throw "Azure CLI token unavailable. Run az login and check DCR RBAC."
+}
+$endpoint = $dce.TrimEnd('/')
+$uri = "$endpoint/dataCollectionRules/$dcr/streams/$stream" + '?api-version=2023-01-01'
+$headers = @{ Authorization = "Bearer $token" }
+for ($offset=0; $offset -lt $records.Count; $offset += $BatchSize) {
+    $count = [Math]::Min($BatchSize, $records.Count - $offset)
+    $batch = $records.GetRange($offset, $count).ToArray()
+    # Force array JSON for all batch sizes including a one-record final batch.
+    $body = ConvertTo-Json -InputObject $batch -Depth 8 -Compress
+    $null = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers `
+        -Body ([Text.Encoding]::UTF8.GetBytes($body)) `
+        -ContentType 'application/json' -TimeoutSec 60
+    Write-Host "Submitted $count records (offset $offset)." -ForegroundColor Green
+}
+Write-Host "Done. Verify ingestion and the DCR output column schema in Log Analytics." -ForegroundColor Green

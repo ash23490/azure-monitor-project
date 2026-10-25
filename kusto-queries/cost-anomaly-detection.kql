@@ -1,233 +1,197 @@
-// ============================================
-// Query 1: Data Verification
-// Confirms synthetic cost data landed correctly
-// ============================================
-AzureCostData_CL
-| count
+// Azure Cloud Monitoring: standalone queries.
+// IMPORTANT: Run ONE numbered query at a time in Logs / Kusto Explorer.
+// Resource data uses Date_s (event day) when available, instead of TimeGenerated
+// (which may be the ingestion time for synthetic/backfilled records).
+// column_ifexists bridges legacy _s/_d columns and DCR-defined column names.
+// Check real column names with: AzureCostData_CL | getschema
 
-// ============================================
-// Query 2
-let CostThresholdPct = 30;
+// =====================================================================
+// QUERY 1: Ingestion verification
+// =====================================================================
+AzureCostData_CL
+| summarize Records=count(), FirstIngest=min(TimeGenerated), LastIngest=max(TimeGenerated)
+
+// =====================================================================
+// QUERY 2: Resource-level cost anomaly detection (NO IsAnomaly dependency).
+// Each observed day is compared with up to 29 prior calendar days.
+// Require 7 observed baseline days and both percentage/absolute thresholds.
+// This scans historical events, including synthetic mid-month spikes.
+// For a real alert, additionally filter Day to today's/recent days.
+// =====================================================================
+let CostThresholdPct = 30.0;
 let CostThresholdAbs = 5.0;
-//
-let CostBaseline =
+let DailyResourceSpend = materialize(
     AzureCostData_CL
-    | where IsAnomaly_b == false
-    | summarize
-        AvgDailyResourceCost = round(sum(DailyCost_d) / 29, 2),
-        StdDev = stdev(DailyCost_d)
-        by ResourceType, ResourceGroup
-    | where isnotempty(ResourceGroup);
-//
-AzureCostData_CL
-| where IsAnomaly_b == true
-| summarize
-    TodayCost = round(sum(DailyCost_d), 2),
-    RecordCount = count()
-    by ResourceType, ResourceGroup
-| join kind=inner CostBaseline on ResourceType, ResourceGroup
-| extend CostIncrease = round(TodayCost - AvgDailyResourceCost, 2)
-| extend PercentageIncrease = round((CostIncrease / AvgDailyResourceCost) * 100, 2)
-| extend DeviationsFromNormal = round(CostIncrease / StdDev, 2)
-| where PercentageIncrease > CostThresholdPct
-    and CostIncrease > CostThresholdAbs
-| order by CostIncrease desc
-| project
-    ResourceGroup,
-    ResourceType,
-    TodayCost,
-    AvgDailyResourceCost,
-    CostIncrease,
-    PercentageIncrease,
-    DeviationsFromNormal,
-    RecordCount
+    | extend Day = startofday(todatetime(column_ifexists("Date_s", column_ifexists("Date", "")))),
+             ResourceName = tostring(column_ifexists("ResourceName_s", column_ifexists("ResourceName", ""))),
+             ResourceType = tostring(column_ifexists("ResourceType_s", column_ifexists("ResourceType", ""))),
+             ResourceGroupName = tostring(column_ifexists("ResourceGroup_s", column_ifexists("ResourceGroup", ""))),
+             Cost = todouble(column_ifexists("DailyCost_d", column_ifexists("DailyCost", real(null))))
+    | where isnotnull(Day) and isnotnull(Cost) and isnotempty(ResourceName)
+    | summarize DailySpend = sum(Cost) by ResourceGroupName, ResourceType, ResourceName, Day
+);
+let PriorResourceDays = DailyResourceSpend
+    | project ResourceGroupName, ResourceType, ResourceName,
+              PreviousDay=Day, PreviousSpend=DailySpend;
+DailyResourceSpend
+| join kind=inner PriorResourceDays on ResourceGroupName, ResourceType, ResourceName
+| where PreviousDay >= Day-29d and PreviousDay < Day
+| summarize BaselineDays=count(),
+            AvgDailyResourceCost=avg(PreviousSpend),
+            StdDevDailyCost=stdev(PreviousSpend)
+    by ResourceGroupName, ResourceType, ResourceName, Day, DailySpend
+| where BaselineDays >= 7 and AvgDailyResourceCost > 0
+| extend CostIncrease = DailySpend - AvgDailyResourceCost
+| extend PercentageIncrease = 100.0 * CostIncrease / AvgDailyResourceCost
+| where CostIncrease > CostThresholdAbs and PercentageIncrease > CostThresholdPct
+| extend DeviationsFromNormal = iff(StdDevDailyCost > 0.0,
+                                     CostIncrease / StdDevDailyCost, real(null))
+| project Day, ResourceGroupName, ResourceName, ResourceType,
+          TodayCost=round(DailySpend,2),
+          AvgDailyResourceCost=round(AvgDailyResourceCost,2),
+          CostIncrease=round(CostIncrease,2),
+          PercentageIncrease=round(PercentageIncrease,2),
+          DeviationsFromNormal=round(DeviationsFromNormal,2), BaselineDays
+| order by Day desc, CostIncrease desc
 
-// ============================================
-// Query 3: Daily Spend Trend
-// Shows 30 days of total daily costs with
-// spike days highlighted
-// Business value: Visual trend for management
-// dashboard and finance reporting
-// ============================================
-let CostBaseline =
+// =====================================================================
+// QUERY 3: Daily spend trend. Baseline is the mean of observed daily
+// totals (not a hardcoded 29-day divisor; no synthetic anomaly label).
+// =====================================================================
+let DailyTotals = materialize(
     AzureCostData_CL
-    | where IsAnomaly_b == false
-    | where TimeGenerated > ago(30d)
-    | summarize AvgDailyCost = sum(DailyCost_d) / 29;
-//
-AzureCostData_CL
-| where TimeGenerated > ago(30d)
-| summarize TotalDailyCost = sum(DailyCost_d) by Date_s, IsAnomaly_b
-| extend Baseline = toscalar(CostBaseline)
-| extend Status = iff(IsAnomaly_b == true, "⚠️ Anomaly", "Normal")
-| extend PercentageVsBaseline = round(((TotalDailyCost - Baseline) / Baseline) * 100, 2)
-| order by Date_s asc
-| project Date_s, TotalDailyCost, Baseline, Status, PercentageVsBaseline
+    | extend Day=startofday(todatetime(column_ifexists("Date_s", column_ifexists("Date", "")))),
+             Cost=todouble(column_ifexists("DailyCost_d", column_ifexists("DailyCost", real(null))))
+    | where isnotnull(Day) and Day between (startofday(ago(30d)) .. startofday(now()))
+      and isnotnull(Cost)
+    | summarize TotalDailyCost=sum(Cost) by Day
+);
+let AvgObservedDayCost = toscalar(DailyTotals | summarize avg(TotalDailyCost));
+DailyTotals
+| extend Baseline=round(AvgObservedDayCost,2),
+         PercentageVsBaseline=iff(AvgObservedDayCost > 0.0,
+             round(100.0 * (TotalDailyCost-AvgObservedDayCost) / AvgObservedDayCost,2), real(null))
+| order by Day asc
+| project Day, TotalDailyCost=round(TotalDailyCost,2), Baseline, PercentageVsBaseline
 
-// ============================================
-// Query 4: Top Spending Resources Ranking
-// Ranks every resource by total spend over
-// 30 days and flags the most expensive ones
-// Business value: Tells ops team exactly where
-// to cut costs and which resources to review
-// ============================================
-AzureCostData_CL
-| where TimeGenerated > ago(30d)
-| summarize 
-    TotalCost = sum(DailyCost_d),
-    AvgDailyCost = round(avg(DailyCost_d), 2),
-    MaxDailyCost = round(max(DailyCost_d), 2),
-    DaysActive = dcount(Date_s)
-    by ResourceName_s, ResourceType
-| extend MonthlyCostProjection = round(AvgDailyCost * 30, 2)
-| | extend CostRating = case(
-    AvgDailyCost > 50, "🔴 High",
-    AvgDailyCost > 20, "🟡 Medium",
-    "🟢 Low")
+// =====================================================================
+// QUERY 4: Top spending resources. Extra "| |" removed.
+// Daily averages are computed from aggregated resource-day spend.
+// =====================================================================
+let ResourceDays =
+    AzureCostData_CL
+    | extend Day=startofday(todatetime(column_ifexists("Date_s", column_ifexists("Date", "")))),
+             ResourceName=tostring(column_ifexists("ResourceName_s", column_ifexists("ResourceName", ""))),
+             ResourceType=tostring(column_ifexists("ResourceType_s", column_ifexists("ResourceType", ""))),
+             ResourceGroupName=tostring(column_ifexists("ResourceGroup_s", column_ifexists("ResourceGroup", ""))),
+             Cost=todouble(column_ifexists("DailyCost_d", column_ifexists("DailyCost", real(null))))
+    | where Day between (startofday(ago(30d)) .. startofday(now())) and isnotnull(Cost)
+    | summarize DailySpend=sum(Cost) by ResourceName, ResourceType, ResourceGroupName, Day;
+ResourceDays
+| summarize TotalCost=round(sum(DailySpend),2),
+            AvgDailyCost=round(avg(DailySpend),2),
+            MaxDailyCost=round(max(DailySpend),2),
+            DaysActive=count()
+    by ResourceName, ResourceType, ResourceGroupName
+| extend MonthlyCostProjection=round(AvgDailyCost*30.0,2)
+| extend CostRating=case(AvgDailyCost>50.0,"High",
+                         AvgDailyCost>20.0,"Medium","Low")
 | order by TotalCost desc
-| project ResourceName_s, ResourceType, TotalCost, AvgDailyCost, MaxDailyCost, MonthlyCostProjection, DaysActive, CostRating
+| project ResourceGroupName, ResourceName, ResourceType, TotalCost,
+          AvgDailyCost, MaxDailyCost, MonthlyCostProjection, DaysActive, CostRating
 
-// ============================================
-// Query 5: Off-Hours Admin Activity Detection
-// Detects admin actions outside business hours
-// Business hours defined as 8am-6pm Mon-Fri
-// Business value: Catches suspicious changes
-// made outside normal working hours
-// ============================================
+// =====================================================================
+// QUERY 5: Off-hours administrative changes, local Toronto business time.
+// Business hours: Monday-Friday, 08:00 inclusive to 18:00 exclusive.
+// Change "America/Toronto" if another locality applies.
+// =====================================================================
 AzureActivity
 | where TimeGenerated > ago(30d)
-| extend HourOfDay = datetime_part("hour", TimeGenerated)
-| extend DayOfWeek = dayofweek(TimeGenerated)
-| extend IsOffHours = iff(
-    HourOfDay < 8 or HourOfDay > 18 or
-    DayOfWeek == 0d or DayOfWeek == 6d,
-    true, false)
-| where IsOffHours == true
-| where ActivityStatusValue == "Success"
-| where CategoryValue == "Administrative"
-| summarize
-    ActionCount = count(),
-    Actions = make_set(OperationNameValue)
-    by Caller, ResourceGroup, bin(TimeGenerated, 1h)
-| order by TimeGenerated desc
-| project
-    TimeGenerated,
-    Caller,
-    ResourceGroup,
-    ActionCount,
-    Actions
+| where ActivityStatusValue == "Success" and CategoryValue == "Administrative"
+| extend LocalTime=datetime_utc_to_local(TimeGenerated, "America/Toronto")
+| extend HourOfDay=datetime_part("hour", LocalTime),
+         DayOfWeek=dayofweek(LocalTime)
+| where HourOfDay < 8 or HourOfDay >= 18 or DayOfWeek == 0d or DayOfWeek == 6d
+| summarize ActionCount=count(), Actions=make_set(OperationNameValue, 30),
+            FirstLocal=min(LocalTime), LastLocal=max(LocalTime)
+    by Caller, ResourceGroup, UtcHour=bin(TimeGenerated,1h)
+| order by UtcHour desc
+| project UtcHour, FirstLocal, LastLocal, Caller, ResourceGroup, ActionCount, Actions
 
-// ============================================
-// Query 6: Non-Compliant Devices by Department
-// Identifies which departments have the most
-// compliance violations
-// Business value: Target remediation efforts
-// ============================================
-IntuneCompliance_CL
-| where IsCompliant_b == false
-| summarize
-    ViolationCount = count(),
-    AffectedDevices = dcount(DeviceName_s),
-    FailedPolicies = make_set(PolicyName_s)
-    by Department_s, OperatingSystem_s
-| order by ViolationCount desc
-| project Department_s, OperatingSystem_s, ViolationCount, AffectedDevices, FailedPolicies
-
-
-// ============================================
-// Query 7: Non-Compliant Devices by Department
-// Identifies which departments have the most
-// compliance violations
-// Business value: Target remediation efforts
-// ============================================
+// =====================================================================
+// QUERY 6: 30-day overall compliance trend. Uses the documented table.
+// =====================================================================
 IntuneComplianceData_CL
 | where TimeGenerated > ago(30d)
-| where IsCompliant_b == false
-| summarize
-    ViolationCount = count(),
-    AffectedDevices = dcount(DeviceName_s),
-    FailedPolicies = make_set(PolicyName_s)
-    by Department_s, OperatingSystem_s
-| order by ViolationCount desc
-| project Department_s, OperatingSystem_s, ViolationCount, AffectedDevices, FailedPolicies
+| summarize TotalChecks=count(), CompliantChecks=countif(IsCompliant_b == true)
+    by Date_s
+| extend ComplianceRatePct=round(100.0*todouble(CompliantChecks)/TotalChecks,2)
+| order by Date_s asc
 
-// ============================================
-// Query 8: Compliance Drift Detection
-// Catches sudden drops in compliance
-// Business value: Early warning for
-// policy failures or device issues
-// ============================================
+// =====================================================================
+// QUERY 7: Non-compliant checks by department.
+// =====================================================================
 IntuneComplianceData_CL
-| where TimeGenerated > ago(30d)
-| where IsComplianceDrift_b == true
-| summarize
-    DriftCount = count(),
-    AffectedDevices = make_set(DeviceName_s),
-    AffectedUsers = make_set(UserName_s)
+| where TimeGenerated > ago(30d) and IsCompliant_b == false
+| summarize ViolationChecks=count(), AffectedDevices=dcount(DeviceName_s),
+            FailedPolicies=make_set(PolicyName_s,30)
+    by Department_s, OperatingSystem_s
+| order by ViolationChecks desc
+
+// =====================================================================
+// QUERY 8: Synthetic compliance drift events (generator labels drift).
+// =====================================================================
+IntuneComplianceData_CL
+| where TimeGenerated > ago(30d) and IsComplianceDrift_b == true
+| summarize DriftEvents=count(), AffectedDevices=make_set(DeviceName_s,50)
     by Date_s, Department_s, PolicyName_s
 | order by Date_s desc
-| project Date_s, Department_s, PolicyName_s, DriftCount, AffectedDevices, AffectedUsers
 
-// ============================================
-// Query 9: AKS Pod Health Status
-// Shows all pods and their current status
-// Business value: Immediate visibility into
-// container failures and restarts
-// ============================================
+// =====================================================================
+// QUERY 9: Pod health based on LATEST snapshot per pod, not every sample.
+// =====================================================================
 KubePodInventory
 | where TimeGenerated > ago(1h)
-| summarize
-    TotalPods = dcount(Name),
-    RunningPods = dcountif(Name, PodStatus == "Running"),
-    FailedPods = dcountif(Name, PodStatus == "Failed"),
-    PendingPods = dcountif(Name, PodStatus == "Pending")
+| summarize arg_max(TimeGenerated, PodStatus) by ClusterName, Namespace, Name
+| summarize TotalPods=count(), RunningPods=countif(PodStatus=="Running"),
+            FailedPods=countif(PodStatus=="Failed"), PendingPods=countif(PodStatus=="Pending")
     by ClusterName, Namespace
-| extend HealthScore = round((todouble(RunningPods) / todouble(TotalPods)) * 100, 2)
-| project ClusterName, Namespace, TotalPods, RunningPods, FailedPods, PendingPods, HealthScore
+| extend HealthScore=round(100.0*todouble(RunningPods)/TotalPods,2)
+| order by HealthScore asc
 
-// ============================================
-// Query 10: Node Health Status
-// Shows resource utilization per node
-// Business value: Catch resource exhaustion
-// before it causes pod failures
-// ============================================
+// =====================================================================
+// QUERY 10: Node health based on latest snapshot; "NotReady" must NOT
+// be counted as Ready (so do not use contains "Ready").
+// =====================================================================
 KubeNodeInventory
 | where TimeGenerated > ago(1h)
-| summarize
-    TotalNodes = dcount(Computer),
-    ReadyNodes = dcountif(Computer, Status contains "Ready")
-    by ClusterName
-| extend NodeHealthPct = round((todouble(ReadyNodes) / todouble(TotalNodes)) * 100, 2)
-| project ClusterName, TotalNodes, ReadyNodes, NodeHealthPct
+| summarize arg_max(TimeGenerated, Status) by ClusterName, Computer
+| summarize TotalNodes=count(), ReadyNodes=countif(Status=="Ready") by ClusterName
+| extend NodeHealthPct=round(100.0*todouble(ReadyNodes)/TotalNodes,2)
 
-// ============================================
-// Query 11: Container Restart Detection
-// Detects containers restarting frequently
-// Business value: Early warning for app
-// crashes before they become outages
-// ============================================
+// =====================================================================
+// QUERY 11: Restarts -- difference between earliest and latest counter
+// snapshots for each named pod/container, NOT sum of snapshot counters.
+// Note: restarts during counter resets / pod recreation may be undercounted.
+// =====================================================================
 KubePodInventory
-| where TimeGenerated > ago(7d)
-| where ContainerRestartCount > 0
-| summarize
-    TotalRestarts = sum(ContainerRestartCount),
-    AffectedPods = dcount(Name)
+| where TimeGenerated > ago(7d) and isnotempty(ContainerName)
+| summarize FirstRestartCount=arg_min(TimeGenerated, ContainerRestartCount),
+            LastRestartCount=arg_max(TimeGenerated, ContainerRestartCount),
+            Samples=count()
+    by ClusterName, Namespace, Name, ContainerName
+| where Samples >= 2
+| extend RestartsInWindow=max_of(0, tolong(LastRestartCount)-tolong(FirstRestartCount))
+| where RestartsInWindow > 0
+| summarize TotalRestarts=sum(RestartsInWindow), AffectedPods=dcount(Name)
     by ClusterName, Namespace, ContainerName
 | order by TotalRestarts desc
-| project ClusterName, Namespace, ContainerName, TotalRestarts, AffectedPods
 
-// ============================================
-// Query 12: AKS Cost Attribution
-// Shows which namespaces consume most resources
-// Business value: Chargeback reporting and
-// cost optimization per team/workload
-// ============================================
+// =====================================================================
+// QUERY 12: Namespace workload proxy (NOT true dollar-cost attribution).
+// =====================================================================
 KubePodInventory
-| where TimeGenerated > ago(24h)
-| summarize
-    PodCount = dcount(Name),
-    ContainerCount = dcount(ContainerName)
-    by ClusterName, Namespace
-| extend ResourceScore = PodCount * ContainerCount
-| order by ResourceScore desc
-| project ClusterName, Namespace, PodCount, ContainerCount, ResourceScore
+| where TimeGenerated > ago(1h)
+| summarize arg_max(TimeGenerated, ContainerName) by ClusterName, Namespace, Name
+| summarize PodCount=count(), ContainerSamples=dcount(ContainerName) by ClusterName, Namespace
+| order by PodCount desc

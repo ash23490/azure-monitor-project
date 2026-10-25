@@ -1,276 +1,144 @@
 {
-  "version": "Notebook/1.0",
-  "items": [
-    {
-      "type": 1,
-      "content": {
-        "json": "# Azure Cost & Compliance Monitor\n---\nReal-time visibility into Azure spend anomalies, resource costs, endpoint compliance, and AKS container health."
-      },
-      "name": "header"
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Baseline Azure Monitor infrastructure. Custom tables, DCR/DCE, diagnostic settings, and AKS need separate deployment. Cost alert is opt-in."
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
     },
-    {
-      "type": 11,
-      "content": {
-        "version": "LinkItem/1.0",
-        "style": "tabs",
-        "links": [
-          {
-            "id": "tab-cost-overview",
-            "cellValue": "selectedTab",
-            "linkTarget": "parameter",
-            "linkLabel": "📊 Cost Overview",
-            "subTarget": "costOverview",
-            "style": "link"
-          },
-          {
-            "id": "tab-anomaly",
-            "cellValue": "selectedTab",
-            "linkTarget": "parameter",
-            "linkLabel": "⚠️ Anomaly Detection",
-            "subTarget": "anomalyDetection",
-            "style": "link"
-          },
-          {
-            "id": "tab-resources",
-            "cellValue": "selectedTab",
-            "linkTarget": "parameter",
-            "linkLabel": "🔝 Top Resources",
-            "subTarget": "topResources",
-            "style": "link"
-          },
-          {
-            "id": "tab-compliance-overview",
-            "cellValue": "selectedTab",
-            "linkTarget": "parameter",
-            "linkLabel": "📋 Compliance Overview",
-            "subTarget": "complianceOverview",
-            "style": "link"
-          },
-          {
-            "id": "tab-compliance-drift",
-            "cellValue": "selectedTab",
-            "linkTarget": "parameter",
-            "linkLabel": "🚨 Compliance Drift",
-            "subTarget": "complianceDrift",
-            "style": "link"
-          },
-          {
-            "id": "tab-aks-health",
-            "cellValue": "selectedTab",
-            "linkTarget": "parameter",
-            "linkLabel": "☸️ AKS Health",
-            "subTarget": "aksHealth",
-            "style": "link"
-          }
-        ]
-      },
-      "name": "tabs"
+    "workspaceName": {
+      "type": "string",
+      "defaultValue": "azure-monitor-law"
     },
-    {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": "AzureCostData_CL\n| where TimeGenerated > ago(30d)\n| summarize TotalDailyCost = sum(DailyCost_d) by Date_s, IsAnomaly_b\n| extend Status = iff(IsAnomaly_b == true, '⚠️ Anomaly', 'Normal')\n| order by Date_s asc\n| project Date_s, TotalDailyCost, Status",
-        "size": 0,
-        "title": "30 Day Spend Trend",
-        "timeContext": {"durationMs": 2592000000},
-        "queryType": 0,
-        "resourceType": "microsoft.operationalinsights/workspaces",
-        "crossComponentResources": [
-          "/subscriptions/12b86d3e-44af-4efa-aed3-c3347d327b4b/resourceGroups/azure-monitor-project/providers/Microsoft.OperationalInsights/workspaces/azure-monitor-law"
-        ],
-        "visualization": "linechart",
-        "chartSettings": {
-          "xAxis": "Date_s",
-          "yAxis": ["TotalDailyCost"],
-          "seriesLabelSettings": [{"seriesName": "TotalDailyCost", "label": "Daily Cost (CAD)"}]
-        }
-      },
-      "conditionalVisibility": {
-        "parameterName": "selectedTab",
-        "comparison": "isEqualTo",
-        "value": "costOverview"
-      },
-      "name": "cost-trend-chart"
+    "storageAccountName": {
+      "type": "string",
+      "defaultValue": "[concat('stmon', uniqueString(subscription().id, resourceGroup().id))]",
+      "metadata": {
+        "description": "Globally unique, lowercase alphanumeric storage account name."
+      }
     },
-    {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": "let CostThresholdPct = 30;\nlet CostThresholdAbs = 5.0;\nlet CostBaseline =\n    AzureCostData_CL\n    | where IsAnomaly_b == false\n    | summarize\n        AvgDailyResourceCost = round(sum(DailyCost_d) / 29, 2),\n        StdDev = stdev(DailyCost_d)\n        by ResourceType, ResourceGroup\n    | where isnotempty(ResourceGroup);\nAzureCostData_CL\n| where IsAnomaly_b == true\n| summarize\n    TodayCost = round(sum(DailyCost_d), 2),\n    RecordCount = count()\n    by ResourceType, ResourceGroup\n| join kind=inner CostBaseline on ResourceType, ResourceGroup\n| extend CostIncrease = round(TodayCost - AvgDailyResourceCost, 2)\n| extend PercentageIncrease = round((CostIncrease / AvgDailyResourceCost) * 100, 2)\n| extend DeviationsFromNormal = round(CostIncrease / StdDev, 2)\n| where PercentageIncrease > CostThresholdPct and CostIncrease > CostThresholdAbs\n| order by CostIncrease desc\n| project ResourceGroup, ResourceType, TodayCost, AvgDailyResourceCost, CostIncrease, PercentageIncrease, DeviationsFromNormal",
-        "size": 0,
-        "title": "Cost Anomalies Detected",
-        "timeContext": {"durationMs": 2592000000},
-        "queryType": 0,
-        "resourceType": "microsoft.operationalinsights/workspaces",
-        "crossComponentResources": [
-          "/subscriptions/12b86d3e-44af-4efa-aed3-c3347d327b4b/resourceGroups/azure-monitor-project/providers/Microsoft.OperationalInsights/workspaces/azure-monitor-law"
-        ],
-        "visualization": "table",
-        "gridSettings": {
-          "formatters": [
-            {"columnMatch": "PercentageIncrease", "formatter": 8, "formatOptions": {"palette": "redGreen"}},
-            {"columnMatch": "CostIncrease", "formatter": 8, "formatOptions": {"palette": "redGreen"}}
-          ]
-        }
-      },
-      "conditionalVisibility": {
-        "parameterName": "selectedTab",
-        "comparison": "isEqualTo",
-        "value": "anomalyDetection"
-      },
-      "name": "anomaly-table"
+    "actionGroupName": {
+      "type": "string",
+      "defaultValue": "azure-monitor-ops-ag"
     },
-    {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": "AzureCostData_CL\n| where TimeGenerated > ago(30d)\n| summarize\n    TotalCost = round(sum(DailyCost_d), 2),\n    AvgDailyCost = round(avg(DailyCost_d), 2),\n    MaxDailyCost = round(max(DailyCost_d), 2),\n    DaysActive = dcount(Date_s)\n    by ResourceName_s, ResourceType\n| extend MonthlyCostProjection = round(AvgDailyCost * 30, 2)\n| extend CostRating = case(\n    AvgDailyCost > 50, '🔴 High',\n    AvgDailyCost > 20, '🟡 Medium',\n    '🟢 Low')\n| order by TotalCost desc\n| project ResourceName_s, ResourceType, TotalCost, AvgDailyCost, MaxDailyCost, MonthlyCostProjection, DaysActive, CostRating",
-        "size": 0,
-        "title": "Top Spending Resources",
-        "timeContext": {"durationMs": 2592000000},
-        "queryType": 0,
-        "resourceType": "microsoft.operationalinsights/workspaces",
-        "crossComponentResources": [
-          "/subscriptions/12b86d3e-44af-4efa-aed3-c3347d327b4b/resourceGroups/azure-monitor-project/providers/Microsoft.OperationalInsights/workspaces/azure-monitor-law"
-        ],
-        "visualization": "table",
-        "gridSettings": {
-          "formatters": [
-            {"columnMatch": "TotalCost", "formatter": 8, "formatOptions": {"palette": "redGreen"}},
-            {"columnMatch": "CostRating", "formatter": 1}
-          ]
-        }
-      },
-      "conditionalVisibility": {
-        "parameterName": "selectedTab",
-        "comparison": "isEqualTo",
-        "value": "topResources"
-      },
-      "name": "top-resources-table"
+    "notificationEmail": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional email recipient; blank makes an action group without an email receiver."
+      }
     },
-    {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": "IntuneComplianceData_CL\n| where TimeGenerated > ago(30d)\n| summarize\n    TotalChecks = count(),\n    CompliantChecks = countif(IsCompliant_b == true),\n    NonCompliantChecks = countif(IsCompliant_b == false)\n    by Date_s\n| extend ComplianceRate = round((todouble(CompliantChecks) / todouble(TotalChecks)) * 100, 2)\n| order by Date_s asc\n| project Date_s, TotalChecks, CompliantChecks, NonCompliantChecks, ComplianceRate",
-        "size": 0,
-        "title": "30 Day Compliance Rate Trend",
-        "timeContext": {"durationMs": 2592000000},
-        "queryType": 0,
-        "resourceType": "microsoft.operationalinsights/workspaces",
-        "crossComponentResources": [
-          "/subscriptions/12b86d3e-44af-4efa-aed3-c3347d327b4b/resourceGroups/azure-monitor-project/providers/Microsoft.OperationalInsights/workspaces/azure-monitor-law"
-        ],
-        "visualization": "linechart",
-        "chartSettings": {
-          "xAxis": "Date_s",
-          "yAxis": ["ComplianceRate"],
-          "seriesLabelSettings": [{"seriesName": "ComplianceRate", "label": "Compliance Rate %"}]
-        }
-      },
-      "conditionalVisibility": {
-        "parameterName": "selectedTab",
-        "comparison": "isEqualTo",
-        "value": "complianceOverview"
-      },
-      "name": "compliance-rate-chart"
-    },
-    {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": "IntuneComplianceData_CL\n| where TimeGenerated > ago(30d)\n| where IsComplianceDrift_b == true\n| summarize\n    DriftCount = count(),\n    AffectedDevices = make_set(DeviceName_s),\n    AffectedUsers = make_set(UserName_s)\n    by Date_s, Department_s, PolicyName_s\n| order by Date_s desc\n| project Date_s, Department_s, PolicyName_s, DriftCount, AffectedDevices, AffectedUsers",
-        "size": 0,
-        "title": "Compliance Drift Events",
-        "timeContext": {"durationMs": 2592000000},
-        "queryType": 0,
-        "resourceType": "microsoft.operationalinsights/workspaces",
-        "crossComponentResources": [
-          "/subscriptions/12b86d3e-44af-4efa-aed3-c3347d327b4b/resourceGroups/azure-monitor-project/providers/Microsoft.OperationalInsights/workspaces/azure-monitor-law"
-        ],
-        "visualization": "table",
-        "gridSettings": {
-          "formatters": [
-            {"columnMatch": "DriftCount", "formatter": 8, "formatOptions": {"palette": "redGreen"}}
-          ]
-        }
-      },
-      "conditionalVisibility": {
-        "parameterName": "selectedTab",
-        "comparison": "isEqualTo",
-        "value": "complianceDrift"
-      },
-      "name": "compliance-drift-table"
-    },
-    {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": "KubePodInventory\n| where TimeGenerated > ago(1h)\n| summarize\n    TotalPods = dcount(Name),\n    RunningPods = dcountif(Name, PodStatus == 'Running'),\n    FailedPods = dcountif(Name, PodStatus == 'Failed'),\n    PendingPods = dcountif(Name, PodStatus == 'Pending')\n    by ClusterName, Namespace\n| extend HealthScore = round((todouble(RunningPods) / todouble(TotalPods)) * 100, 2)\n| project ClusterName, Namespace, TotalPods, RunningPods, FailedPods, PendingPods, HealthScore",
-        "size": 0,
-        "title": "AKS Pod Health Status",
-        "timeContext": {"durationMs": 2592000000},
-        "queryType": 0,
-        "resourceType": "microsoft.operationalinsights/workspaces",
-        "crossComponentResources": [
-          "/subscriptions/12b86d3e-44af-4efa-aed3-c3347d327b4b/resourceGroups/azure-monitor-project/providers/Microsoft.OperationalInsights/workspaces/azure-monitor-law"
-        ],
-        "visualization": "table",
-        "gridSettings": {
-          "formatters": [
-            {"columnMatch": "HealthScore", "formatter": 8, "formatOptions": {"palette": "redGreen"}},
-            {"columnMatch": "FailedPods", "formatter": 8, "formatOptions": {"palette": "redGreen"}}
-          ]
-        }
-      },
-      "conditionalVisibility": {
-        "parameterName": "selectedTab",
-        "comparison": "isEqualTo",
-        "value": "aksHealth"
-      },
-      "name": "aks-pod-health"
-    },
-    {
-      "type": 3,
-      "content": {
-        "version": "KqlItem/1.0",
-        "query": "KubePodInventory\n| where TimeGenerated > ago(7d)\n| where ContainerRestartCount > 0\n| summarize\n    TotalRestarts = sum(ContainerRestartCount),\n    AffectedPods = dcount(Name)\n    by ClusterName, Namespace, ContainerName\n| order by TotalRestarts desc\n| project ClusterName, Namespace, ContainerName, TotalRestarts, AffectedPods",
-        "size": 0,
-        "title": "Container Restart Detection",
-        "timeContext": {"durationMs": 2592000000},
-        "queryType": 0,
-        "resourceType": "microsoft.operationalinsights/workspaces",
-        "crossComponentResources": [
-          "/subscriptions/12b86d3e-44af-4efa-aed3-c3347d327b4b/resourceGroups/azure-monitor-project/providers/Microsoft.OperationalInsights/workspaces/azure-monitor-law"
-        ],
-        "visualization": "table",
-        "gridSettings": {
-          "formatters": [
-            {"columnMatch": "TotalRestarts", "formatter": 8, "formatOptions": {"palette": "redGreen"}}
-          ]
-        }
-      },
-      "conditionalVisibility": {
-        "parameterName": "selectedTab",
-        "comparison": "isEqualTo",
-        "value": "aksHealth"
-      },
-      "name": "aks-restart-table"
+    "deployCostAlert": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable only when AzureCostData_CL exists and the alert KQL has been validated against the actual schema."
+      }
     }
-  ],
+  },
+  "variables": {},
   "resources": [
-    "/subscriptions/12b86d3e-44af-4efa-aed3-c3347d327b4b/resourceGroups/azure-monitor-project/providers/Microsoft.OperationalInsights/workspaces/azure-monitor-law"
-  ],
-  "parameters": [
     {
-      "id": "selectedTab",
-      "version": "KqlParameterItem/1.0",
-      "name": "selectedTab",
-      "type": 1,
-      "defaultValue": "costOverview"
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2023-09-01",
+      "name": "[parameters('workspaceName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30,
+        "features": {
+          "disableLocalAuth": true,
+          "enableLogAccessUsingOnlyResourcePermissions": true
+        },
+        "publicNetworkAccessForIngestion": "Enabled",
+        "publicNetworkAccessForQuery": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[parameters('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2",
+      "properties": {
+        "supportsHttpsTrafficOnly": true,
+        "minimumTlsVersion": "TLS1_2",
+        "allowBlobPublicAccess": false,
+        "allowSharedKeyAccess": false,
+        "defaultToOAuthAuthentication": true,
+        "accessTier": "Hot"
+      }
+    },
+    {
+      "type": "Microsoft.Insights/actionGroups",
+      "apiVersion": "2023-01-01",
+      "name": "[parameters('actionGroupName')]",
+      "location": "global",
+      "properties": {
+        "groupShortName": "MonOps",
+        "enabled": true,
+        "emailReceivers": "[if(empty(parameters('notificationEmail')), json('[]'), createArray(createObject('name', 'OpsEmail', 'emailAddress', parameters('notificationEmail'), 'useCommonAlertSchema', true())))]"
+      }
+    },
+    {
+      "condition": "[parameters('deployCostAlert')]",
+      "type": "Microsoft.Insights/scheduledQueryRules",
+      "apiVersion": "2023-12-01",
+      "name": "cost-anomaly-demo-alert",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+        "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+      ],
+      "properties": {
+        "displayName": "Cost anomaly based on historical spend",
+        "description": "Lab/example: runs against a populated custom table; use actual cost ingestion for production.",
+        "enabled": true,
+        "severity": 3,
+        "evaluationFrequency": "PT5M",
+        "windowSize": "P1D",
+        "scopes": [
+          "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+        ],
+        "autoMitigate": true,
+        "actions": {
+          "actionGroups": [
+            "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+          ]
+        },
+        "criteria": {
+          "allOf": [
+            {
+              "query": "let Daily = AzureCostData_CL\n| extend Day = startofday(todatetime(column_ifexists(\"Date_s\", column_ifexists(\"Date\", \"\")))),\n         Resource = tostring(column_ifexists(\"ResourceName_s\", column_ifexists(\"ResourceName\", \"\"))),\n         Group = tostring(column_ifexists(\"ResourceGroup_s\", column_ifexists(\"ResourceGroup\", \"\"))),\n         Cost = todouble(column_ifexists(\"DailyCost_d\", column_ifexists(\"DailyCost\", real(null))))\n| where isnotnull(Day) and isnotnull(Cost)\n| summarize Spend = sum(Cost) by Day, Group, Resource;\nlet Current = Daily\n| where Day >= startofday(ago(1d))\n| summarize arg_max(Day, Spend) by Group, Resource\n| project Group, Resource, CurrentDay=Day, CurrentSpend=Spend;\nlet Previous = Daily\n| join kind=inner (Current | project Group, Resource, CurrentDay) on Group, Resource\n| where Day < CurrentDay and Day >= CurrentDay-29d\n| summarize BaselineDays=count(), Baseline=avg(Spend) by Group, Resource;\nCurrent\n| join kind=inner Previous on Group, Resource\n| where BaselineDays >= 7 and Baseline > 0\n| where CurrentSpend-Baseline > 5.0 and (CurrentSpend-Baseline)/Baseline > 0.30\n| project Group, Resource, CurrentSpend, Baseline",
+              "timeAggregation": "Count",
+              "operator": "GreaterThan",
+              "threshold": 0
+            }
+          ]
+        }
+      }
     }
   ],
-  "styleSettings": {},
-  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+  "outputs": {
+    "workspaceResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]"
+    },
+    "actionGroupResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Insights/actionGroups', parameters('actionGroupName'))]"
+    },
+    "storageAccountName": {
+      "type": "string",
+      "value": "[parameters('storageAccountName')]"
+    }
+  }
 }

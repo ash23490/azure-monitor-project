@@ -1,27 +1,30 @@
-# PowerShell
-*.ps1xml
-*.psd1
-
-# Azure credentials - NEVER commit these
-*.json.bak
+# Local settings / credentials
+.env
+.env.*
+!.env.example
 local.settings.json
 appsettings.local.json
-
-# Workspace keys and secrets
+*.pem
+*.pfx
+*.key
 *secrets*
 *credentials*
 *password*
-*.key
 
-# VS Code
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# VS Code / operating systems
 .vscode/
 *.code-workspace
-
-# Windows
 Thumbs.db
 Desktop.ini
-$RECYCLE.BIN/
 
-# Logs
+# Temporary/generated files
 *.log
 *.tmp
+*.json.bak
