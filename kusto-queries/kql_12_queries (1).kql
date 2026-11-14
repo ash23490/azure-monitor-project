@@ -1,0 +1,254 @@
+// Azure Cloud Monitoring and Observability — portfolio/lab queries
+// IMPORTANT: Run ONE numbered query at a time in Azure Logs / Kusto Explorer.
+// Source tables: AzureResourceCost_CL, IntuneDeviceCompliance_CL,
+//                AzureActivity, KubePodInventory, KubeNodeInventory.
+// Cost and compliance datasets are SYNTHETIC; AKS/Activity telemetry comes from Azure.
+// Some query views use event dates rather than ingestion timestamps.
+// AKS uses a historical window so stopped-cluster snapshots remain demonstrable;
+// stale results must not be represented as current cluster health.
+// Cost threshold: >30% AND >$10 above resource's prior observed-day average.
+// Check table/column names in your environment before reuse.
+
+// ====================================================================
+// QUERY 1: Cost ingestion verification
+// ====================================================================
+AzureResourceCost_CL
+| summarize Records=count(), FirstIngest=min(TimeGenerated), LastIngest=max(TimeGenerated)
+
+// ====================================================================
+// QUERY 2: Historical resource-level cost anomaly detection (30% AND $10 above baseline)
+// ====================================================================
+// This lab generator emits one cost record per resource and event day.
+// arg_max deduplicates repeated uploads of those same synthetic records.
+// Historical query: includes the planted test spike without reading IsAnomaly_b.
+let CostThresholdPct = 30.0;
+let CostThresholdAbs = 10.0;
+let DailyResourceSpend = materialize(
+    AzureResourceCost_CL
+    | extend Day=startofday(todatetime(column_ifexists("Date_s", column_ifexists("Date", "")))),
+             ResourceName=tostring(column_ifexists("ResourceName_s", column_ifexists("ResourceName", ""))),
+             ResourceType=tostring(column_ifexists("ResourceType_s", column_ifexists("ResourceType", ""))),
+             ResourceGroupName=tostring(column_ifexists("ResourceGroup_s", column_ifexists("ResourceGroup", ""))),
+             Cost=todouble(column_ifexists("DailyCost_d", column_ifexists("DailyCost", real(null))))
+    | where isnotnull(Day) and isnotnull(Cost) and isnotempty(ResourceName)
+    | summarize arg_max(TimeGenerated, Cost) by ResourceGroupName, ResourceType, ResourceName, Day
+    | project ResourceGroupName, ResourceType, ResourceName, Day, DailySpend=Cost
+);
+let PriorResourceDays = DailyResourceSpend
+    | project ResourceGroupName, ResourceType, ResourceName,
+              PreviousDay=Day, PreviousSpend=DailySpend;
+DailyResourceSpend
+| join kind=inner PriorResourceDays on ResourceGroupName, ResourceType, ResourceName
+| where PreviousDay >= Day-29d and PreviousDay < Day
+| summarize BaselineDays=count(), AvgDailyResourceCost=avg(PreviousSpend),
+            StdDevDailyCost=stdev(PreviousSpend)
+    by ResourceGroupName, ResourceType, ResourceName, Day, DailySpend
+| where BaselineDays >= 7 and AvgDailyResourceCost > 0
+| extend CostIncrease = DailySpend - AvgDailyResourceCost
+| extend PercentageIncrease = 100.0 * CostIncrease / AvgDailyResourceCost
+| where CostIncrease > CostThresholdAbs and PercentageIncrease > CostThresholdPct
+| extend DeviationsFromNormal=iff(StdDevDailyCost > 0.0,
+                                  CostIncrease/StdDevDailyCost, real(null))
+| project Day, ResourceGroupName, ResourceName, ResourceType,
+          TodayCost=round(DailySpend,2),
+          AvgDailyResourceCost=round(AvgDailyResourceCost,2),
+          CostIncrease=round(CostIncrease,2),
+          PercentageIncrease=round(PercentageIncrease,2),
+          DeviationsFromNormal=round(DeviationsFromNormal,2), BaselineDays
+| order by Day desc, CostIncrease desc
+
+// ====================================================================
+// QUERY 3: Daily synthetic spending trend (by event date)
+// ====================================================================
+let DailyTotals = materialize(
+    AzureResourceCost_CL
+    | extend Day=startofday(todatetime(column_ifexists("Date_s", column_ifexists("Date", "")))),
+             ResourceName=tostring(column_ifexists("ResourceName_s", column_ifexists("ResourceName", ""))),
+             ResourceType=tostring(column_ifexists("ResourceType_s", column_ifexists("ResourceType", ""))),
+             ResourceGroupName=tostring(column_ifexists("ResourceGroup_s", column_ifexists("ResourceGroup", ""))),
+             Cost=todouble(column_ifexists("DailyCost_d", column_ifexists("DailyCost", real(null))))
+    | where Day between (startofday(ago(30d)) .. startofday(now())) and isnotnull(Cost)
+    | summarize arg_max(TimeGenerated, Cost) by Day, ResourceGroupName, ResourceType, ResourceName
+    | summarize TotalDailyCost=sum(Cost) by Day
+);
+let AvgObservedDayCost=toscalar(DailyTotals | summarize avg(TotalDailyCost));
+DailyTotals
+| extend Baseline=round(AvgObservedDayCost,2),
+         PercentageVsBaseline=iff(AvgObservedDayCost>0,
+              round(100.0*(TotalDailyCost-AvgObservedDayCost)/AvgObservedDayCost,2), real(null))
+| project Day, TotalDailyCost=round(TotalDailyCost,2), Baseline, PercentageVsBaseline
+| order by Day asc
+
+// ====================================================================
+// QUERY 4: Top spending resources and 30-day projection
+// ====================================================================
+let ResourceDays =
+    AzureResourceCost_CL
+    | extend Day=startofday(todatetime(column_ifexists("Date_s", column_ifexists("Date", "")))),
+             ResourceName=tostring(column_ifexists("ResourceName_s", column_ifexists("ResourceName", ""))),
+             ResourceType=tostring(column_ifexists("ResourceType_s", column_ifexists("ResourceType", ""))),
+             ResourceGroupName=tostring(column_ifexists("ResourceGroup_s", column_ifexists("ResourceGroup", ""))),
+             Cost=todouble(column_ifexists("DailyCost_d", column_ifexists("DailyCost", real(null))))
+    | where Day between (startofday(ago(30d)) .. startofday(now())) and isnotnull(Cost)
+    | summarize arg_max(TimeGenerated, Cost) by ResourceName, ResourceType, ResourceGroupName, Day
+    | project ResourceName, ResourceType, ResourceGroupName, Day, DailySpend=Cost;
+ResourceDays
+| summarize TotalCost=round(sum(DailySpend),2),
+            AvgDailyCost=round(avg(DailySpend),2),
+            MaxDailyCost=round(max(DailySpend),2), DaysActive=count()
+    by ResourceName, ResourceType, ResourceGroupName
+| extend MonthlyCostProjection=round(AvgDailyCost*30.0,2)
+| extend CostRating=case(AvgDailyCost>50.0,"High",
+                         AvgDailyCost>20.0,"Medium","Low")
+| project ResourceGroupName, ResourceName, ResourceType, TotalCost,
+          AvgDailyCost, MaxDailyCost, MonthlyCostProjection, DaysActive, CostRating
+| order by TotalCost desc
+
+// ====================================================================
+// QUERY 5: Off-hours Azure administrative changes (Toronto time)
+// ====================================================================
+// Business hours: Monday-Friday, 08:00-18:00 local time.
+AzureActivity
+| where TimeGenerated > ago(30d)
+| where ActivityStatusValue == "Success" and CategoryValue == "Administrative"
+| extend LocalTime=datetime_utc_to_local(TimeGenerated,"America/Toronto")
+| extend HourOfDay=datetime_part("hour",LocalTime), DayOfWeek=dayofweek(LocalTime)
+| where HourOfDay < 8 or HourOfDay >= 18 or DayOfWeek == 0d or DayOfWeek == 6d
+| summarize ActionCount=count(), Actions=make_set(OperationNameValue,30),
+            FirstLocal=min(LocalTime), LastLocal=max(LocalTime)
+    by Caller, ResourceGroup, UtcHour=bin(TimeGenerated,1h)
+| project UtcHour, FirstLocal, LastLocal, Caller, ResourceGroup, ActionCount, Actions
+| order by UtcHour desc
+
+// ====================================================================
+// QUERY 6: 30-day Intune synthetic compliance rate
+// ====================================================================
+// Synthetic test records: one check per device, policy, and event day.
+// Deduplicate uploads; use the generator's Date rather than ingestion timestamp.
+let Checks = materialize(
+    IntuneDeviceCompliance_CL
+    | extend Day=startofday(todatetime(column_ifexists("Date", column_ifexists("Date_s", "")))),
+             DeviceName=tostring(column_ifexists("DeviceName", column_ifexists("DeviceName_s", ""))),
+             PolicyName=tostring(column_ifexists("PolicyName", column_ifexists("PolicyName_s", ""))),
+             Department=tostring(column_ifexists("Department", column_ifexists("Department_s", ""))),
+             OperatingSystem=tostring(column_ifexists("OperatingSystem", column_ifexists("OperatingSystem_s", ""))),
+             UserName=tostring(column_ifexists("UserName", column_ifexists("UserName_s", ""))),
+             Compliant=tobool(column_ifexists("IsCompliant", column_ifexists("IsCompliant_b", bool(null)))),
+             Drift=tobool(column_ifexists("IsComplianceDrift", column_ifexists("IsComplianceDrift_b", bool(null))))
+    | where Day between (startofday(ago(30d)) .. startofday(now()))
+    | summarize arg_max(TimeGenerated, *) by Day, DeviceName, PolicyName
+);
+Checks
+| summarize TotalChecks=count(), CompliantChecks=countif(Compliant == true),
+            NonCompliantChecks=countif(Compliant == false) by Day
+| extend ComplianceRate=round(100.0*todouble(CompliantChecks)/TotalChecks,2)
+| project Day, TotalChecks, CompliantChecks, NonCompliantChecks, ComplianceRate
+| order by Day asc
+
+// ====================================================================
+// QUERY 7: Non-compliant checks by department
+// ====================================================================
+// Synthetic test records: one check per device, policy, and event day.
+// Deduplicate uploads; use the generator's Date rather than ingestion timestamp.
+let Checks = materialize(
+    IntuneDeviceCompliance_CL
+    | extend Day=startofday(todatetime(column_ifexists("Date", column_ifexists("Date_s", "")))),
+             DeviceName=tostring(column_ifexists("DeviceName", column_ifexists("DeviceName_s", ""))),
+             PolicyName=tostring(column_ifexists("PolicyName", column_ifexists("PolicyName_s", ""))),
+             Department=tostring(column_ifexists("Department", column_ifexists("Department_s", ""))),
+             OperatingSystem=tostring(column_ifexists("OperatingSystem", column_ifexists("OperatingSystem_s", ""))),
+             UserName=tostring(column_ifexists("UserName", column_ifexists("UserName_s", ""))),
+             Compliant=tobool(column_ifexists("IsCompliant", column_ifexists("IsCompliant_b", bool(null)))),
+             Drift=tobool(column_ifexists("IsComplianceDrift", column_ifexists("IsComplianceDrift_b", bool(null))))
+    | where Day between (startofday(ago(30d)) .. startofday(now()))
+    | summarize arg_max(TimeGenerated, *) by Day, DeviceName, PolicyName
+);
+Checks
+| where Compliant == false
+| summarize ViolationChecks=count(), AffectedDevices=dcount(DeviceName),
+            FailedPolicies=make_set(PolicyName,30)
+    by Department, OperatingSystem
+| order by ViolationChecks desc
+
+// ====================================================================
+// QUERY 8: Simulated Intune compliance drift events
+// ====================================================================
+// Synthetic test records: one check per device, policy, and event day.
+// Deduplicate uploads; use the generator's Date rather than ingestion timestamp.
+let Checks = materialize(
+    IntuneDeviceCompliance_CL
+    | extend Day=startofday(todatetime(column_ifexists("Date", column_ifexists("Date_s", "")))),
+             DeviceName=tostring(column_ifexists("DeviceName", column_ifexists("DeviceName_s", ""))),
+             PolicyName=tostring(column_ifexists("PolicyName", column_ifexists("PolicyName_s", ""))),
+             Department=tostring(column_ifexists("Department", column_ifexists("Department_s", ""))),
+             OperatingSystem=tostring(column_ifexists("OperatingSystem", column_ifexists("OperatingSystem_s", ""))),
+             UserName=tostring(column_ifexists("UserName", column_ifexists("UserName_s", ""))),
+             Compliant=tobool(column_ifexists("IsCompliant", column_ifexists("IsCompliant_b", bool(null)))),
+             Drift=tobool(column_ifexists("IsComplianceDrift", column_ifexists("IsComplianceDrift_b", bool(null))))
+    | where Day between (startofday(ago(30d)) .. startofday(now()))
+    | summarize arg_max(TimeGenerated, *) by Day, DeviceName, PolicyName
+);
+Checks
+| where Drift == true
+| summarize DriftCount=count(), AffectedDevices=make_set(DeviceName,50),
+            AffectedUsers=make_set(UserName,50)
+    by Day, Department, PolicyName
+| project Day, Department, PolicyName, DriftCount, AffectedDevices, AffectedUsers
+| order by Day desc
+
+// ====================================================================
+// QUERY 9: AKS pod health — last recorded status per pod (historical)
+// ====================================================================
+// Historical 30-day window because this demo AKS cluster may be stopped.
+// Do not treat this as a live status check.
+KubePodInventory
+| where TimeGenerated > ago(30d)
+| summarize arg_max(TimeGenerated, PodStatus) by ClusterName, Namespace, Name
+| summarize TotalPods=count(), RunningPods=countif(PodStatus=="Running"),
+            FailedPods=countif(PodStatus=="Failed"), PendingPods=countif(PodStatus=="Pending"),
+            LastObserved=max(TimeGenerated)
+    by ClusterName, Namespace
+| extend HealthScore=round(100.0*todouble(RunningPods)/TotalPods,2)
+| project ClusterName, Namespace, LastObserved, TotalPods, RunningPods,
+          PendingPods, FailedPods, HealthScore
+| order by HealthScore asc
+
+// ====================================================================
+// QUERY 10: AKS node health — last recorded status per node (historical)
+// ====================================================================
+// Historical status, not proof that a currently stopped cluster is healthy.
+KubeNodeInventory
+| where TimeGenerated > ago(30d)
+| summarize arg_max(TimeGenerated, Status) by ClusterName, Computer
+| summarize TotalNodes=count(), ReadyNodes=countif(Status=="Ready"),
+            LastObserved=max(TimeGenerated) by ClusterName
+| extend NodeHealthPct=round(100.0*todouble(ReadyNodes)/TotalNodes,2)
+| project ClusterName, LastObserved, TotalNodes, ReadyNodes, NodeHealthPct
+
+// ====================================================================
+// QUERY 11: AKS container restart counter increases
+// ====================================================================
+// A counter reset or pod recreation can cause undercounting.
+KubePodInventory
+| where TimeGenerated > ago(30d) and isnotempty(ContainerName)
+| summarize FirstRestartCount=arg_min(TimeGenerated, ContainerRestartCount),
+            LastRestartCount=arg_max(TimeGenerated, ContainerRestartCount), Samples=count()
+    by ClusterName, Namespace, Name, ContainerName
+| where Samples >= 2
+| extend RestartsInWindow=max_of(0, tolong(LastRestartCount)-tolong(FirstRestartCount))
+| where RestartsInWindow > 0
+| summarize TotalRestarts=sum(RestartsInWindow), AffectedPods=dcount(Name)
+    by ClusterName, Namespace, ContainerName
+| order by TotalRestarts desc
+
+// ====================================================================
+// QUERY 12: AKS namespace workload proxy (NOT dollar-cost attribution)
+// ====================================================================
+// This counts last-observed pod inventory; it is not billing data.
+KubePodInventory
+| where TimeGenerated > ago(30d)
+| summarize arg_max(TimeGenerated, ContainerName) by ClusterName, Namespace, Name
+| summarize PodCount=count(), ContainerSamples=dcount(ContainerName),
+            LastObserved=max(TimeGenerated) by ClusterName, Namespace
+| project ClusterName, Namespace, LastObserved, PodCount, ContainerSamples
+| order by PodCount desc
