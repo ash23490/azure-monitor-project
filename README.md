@@ -1,23 +1,15 @@
-# Azure Cloud Monitoring & Observability
-
-**Azure monitoring and data engineering portfolio lab** | Azure Monitor · Log Analytics · KQL · Python · PowerShell · Microsoft Entra ID · DCR/DCE · Power BI · AKS · ARM
-
-## Project overview
-
+Azure Cloud Monitoring & Observability
+My Azure monitoring and data engineering portfolio lab | Azure Monitor · Log Analytics · KQL · Python · PowerShell · Microsoft Entra ID · DCR/DCE · Power BI · AKS · ARM
+Project overview
 I built an Azure observability lab to investigate four operational questions:
+1. Cloud cost: Which resources drive spending, and when does an individual resource spike above its usual baseline?
+2. Device compliance: How do compliance checks change over time, and which departments or policies require attention?
+3. Administrative activity: Which changes occur outside defined business hours?
+4. Kubernetes health: Which pods/nodes report unhealthy states, restarts, or unusual workload distribution?
+I combined synthetic data generation, Azure Monitor ingestion, Kusto Query Language (KQL), an Azure Workbook, a three-page Power BI report, and an email notification test. This project was as much about solving real configuration and monitoring problems as it was about building dashboards.
+Lab disclosure: I generated the cost and Intune compliance records myself for testing. They are synthetic, not live Azure Cost Management exports or real Intune tenant data. I used Azure Activity and AKS monitoring data where configured. AKS statistics describe historical snapshots, not necessarily the cluster’s current state.
 
-1. **Cloud cost:** Which resources drive spending, and when does an individual resource spike above its usual baseline?
-2. **Device compliance:** How do compliance checks change over time, and which departments or policies require attention?
-3. **Administrative activity:** Which changes occur outside defined business hours?
-4. **Kubernetes health:** Which pods/nodes report unhealthy states, restarts, or unusual workload distribution?
-
-The project combines synthetic data generation, Azure Monitor ingestion, Kusto Query Language (KQL), an Azure Workbook, a three-page Power BI report, and a test notification workflow. A major part of the work was diagnosing and correcting authentication, schema, query, and visualization issues.
-
-> **Lab disclosure:** Cost and Intune compliance records are **synthetic**. They demonstrate ingestion and analytical methods; they are not live Azure Cost Management exports or real Microsoft Intune tenant data. Azure Activity and AKS data come from Azure monitoring sources where configured. AKS figures below refer to historical snapshots, not necessarily a currently running cluster.
-
-## Architecture
-
-```text
+Architecture
                        DATA SOURCES
   +----------------------+------------------------+
   | Synthetic Azure cost | Synthetic Intune checks|
@@ -51,129 +43,102 @@ The project combines synthetic data generation, Azure Monitor ingestion, Kusto Q
   Additional monitored sources:
     Azure Activity Log --> Diagnostic settings --> Log Analytics
     AKS / Container Insights ---------------> Log Analytics
-```
 
-**Why these components?** The generators create predictable test scenarios; Microsoft Entra ID issues short-lived authentication tokens; the **Logs Ingestion API** receives HTTPS requests; the **DCE** supplies an ingestion endpoint; the **DCR** defines stream/schema transformation and destination; Log Analytics stores records for KQL. The Workbook, Power BI, and alerting layer turn that telemetry into operational decisions.
+Why I chose this architecture: I needed a repeatable way to create test data, authenticate securely, and inspect monitoring results. I used Microsoft Entra ID for short-lived OAuth tokens, the Logs Ingestion API to accept HTTPS requests, a DCE for the ingestion endpoint, a DCR to define the data stream and destination, and Log Analytics to store and query the records. I then used the Workbook, Power BI, and an alert rule to make the data useful.
+Data pipelines
+Pipeline	Source and ingestion	Log Analytics destination	Purpose
+Cost monitoring	PowerShell → OAuth → Logs Ingestion API → DCE/DCR	AzureResourceCost_CL	Resource/day spending, baselines, anomaly analysis
+Compliance monitoring	Python → DefaultAzureCredential → Logs Ingestion API → DCE/DCR	IntuneDeviceCompliance_CL	Device/policy compliance and drift
+Administrative auditing	Azure Activity Log via diagnostic settings	AzureActivity	Review management operations and after-hours changes
+AKS monitoring	Azure Kubernetes Service + Container Insights	KubePodInventory, KubeNodeInventory	Historical pod, node, restart, and namespace analysis
 
-### Data pipelines
 
-| Pipeline | Source and ingestion | Log Analytics destination | Purpose |
-|---|---|---|---|
-| Cost monitoring | PowerShell → OAuth → Logs Ingestion API → DCE/DCR | `AzureResourceCost_CL` | Resource/day spending, baselines, anomaly analysis |
-| Compliance monitoring | Python → `DefaultAzureCredential` → Logs Ingestion API → DCE/DCR | `IntuneDeviceCompliance_CL` | Device/policy compliance and drift |
-| Administrative auditing | Azure Activity Log via diagnostic settings | `AzureActivity` | Review management operations and after-hours changes |
-| AKS monitoring | Azure Kubernetes Service + Container Insights | `KubePodInventory`, `KubeNodeInventory` | Historical pod, node, restart, and namespace analysis |
+I migrated the cost and compliance scripts to the modern Logs Ingestion API instead of the older SharedKey-based HTTP Data Collector API. OAuth determines how the scripts authenticate; HTTPS is how they communicate.
+What I implemented
+1. Data generation and ingestion
+- I developed an OAuth-based PowerShell cost generator with a dry-run mode and an explicit -Send option.
+- I tested ingestion of 210 synthetic cost records representing 7 resources across 30 days.
+- I developed an OAuth-based Python Intune compliance generator with structured logging, batching, configuration checks, and retry handling.
+- I tested 1,500 synthetic compliance records: 10 simulated devices × 5 policies × 30 days.
+- I configured DCE/DCR ingestion streams to route the generated records to separate Log Analytics custom tables.
+- I used generated anomaly and drift flags as test labels, but calculated cost anomalies from actual spending values rather than simply filtering those labels.
+2. KQL monitoring and detection
+I keep 12 individually runnable KQL queries in one file: kusto-queries/cost-anomaly-detection.kql. I run one numbered query at a time in Log Analytics.
+Query	Analysis
+1	Verify synthetic cost ingestion
+2	Detect resource-level cost anomalies using a historical baseline, not the planted anomaly flag
+3	Analyze daily spend and observed-day baseline
+4	Identify highest-spending resources
+5	Detect off-hours Azure administrative operations using Toronto local time
+6	Show compliance trends across the sample period
+7	Summarize noncompliant checks by department
+8	Identify simulated compliance drift
+9	Evaluate pod health using the latest observed pod snapshot
+10	Evaluate node health without misclassifying NotReady as Ready
+11	Estimate container restarts using counter differences instead of summing snapshots
+12	Compare namespace workload distribution (not actual AKS cost attribution)
 
-The cost and compliance paths use the modern Logs Ingestion API, **not** the older workspace SharedKey-based HTTP Data Collector API. OAuth still communicates over HTTPS; it is the authentication method, not a separate transport protocol.
 
-## What I implemented
+For historical synthetic cost records, I use the event-date field (such as Date_s) when available because the ingestion timestamp (TimeGenerated) can be different. I also use column_ifexists() in some queries to handle differences between older table columns and DCR-mapped columns. I check the actual table schema before running a query.
+3. Azure Workbook and Power BI
+- I built and updated multiple Azure Workbook monitoring views. I keep the workbook definition in dashboards/workbook.json and document five tabs; I verify the exported JSON separately from the live workbook in Azure.
+- I built three Power BI report pages: Azure Cost Analytics, Intune Compliance Analytics, and AKS Monitoring.
+- I used KQL to aggregate cost trends, compare resource spending, calculate compliance rates, count failed checks, and examine historical Kubernetes health.
+- I fixed queries and report connections when schema mismatches and malformed requests prevented charts from rendering.
+I built the Power BI report locally. My screenshots show the report pages; I will only include the editable .pbix file if I verify that the file is safe to publish.
+4. Alerting and infrastructure
+- I configured a Log Analytics cost-anomaly alert using a comparison against historical spending, instead of relying on the generated IsAnomaly label.
+- I configured an Action Group and successfully tested its email notification.
+- I set the alert evaluation frequency to 15 minutes and disabled the alert after testing to avoid unnecessary ongoing charges.
+- I kept an ARM template for the baseline workspace, storage account, action group, and optional alert. I configured other parts, such as DCR/DCE, custom tables, diagnostic settings, and AKS, separately; the ARM template does not recreate the entire lab.
+What I verified: The Action Group successfully sent a test email. I do not claim this proves a cost anomaly triggered the entire alert workflow end to end.
+Results and validation
+Area	Observed lab result	Interpretation
+Cost ingestion	210 resource-day records	Successfully tested synthetic cost ingestion and querying
+Compliance ingestion	1,500 generated check records	Tested 10 endpoints, 5 policies, and 30 days of synthetic activity
+KQL	12 queries reviewed/validated	Covers ingestion, cost, activity, compliance, and AKS inventory
+Azure Workbook	Monitoring views updated	Interactive Azure-side exploration of the log data
+Power BI	3 report pages completed	Separately visualizes cost, compliance, and AKS health
+AKS	Historical pod/node inventory analyzed	Historical data remains queryable; cluster status affects freshness
+Notification	Action Group test email received	Confirms the test notification path, not full alert triggering
 
-### 1. Data generation and ingestion
 
-- Developed an OAuth-based **PowerShell** cost generator, with dry-run and explicit `-Send` modes.
-- Tested **210 synthetic cost records** covering **7 resources across 30 days** (one resource/day record per observation).
-- Developed an OAuth-based **Python** Intune compliance generator with structured logging, batching, configuration validation, and retry handling.
-- Tested a **1,500-record compliance dataset** representing **10 simulated endpoints × 5 policy checks × 30 days**.
-- Used DCE/DCR stream mapping to route both datasets to their respective custom Log Analytics tables.
-- Preserved generated anomaly/drift flags as test labels, while writing detection KQL that calculates findings from observable values.
+These are results I observed in my lab, not guarantees for a new deployment. Re-running a generator may create additional or duplicate records, so I check dates, record counts, and identifiers before interpreting totals.
+Troubleshooting and engineering decisions
+I spent a significant part of this project troubleshooting. The issues below are problems I encountered and investigated, rather than hypothetical examples.
+Issue	Diagnosis / investigation	Resolution or learning
+Azure Cost Management CLI errors	My direct cost queries returned BadRequest and were not dependable for the lab	I generated clearly labeled synthetic cost data instead of pretending it was real billing data
+Logs Ingestion API returned HTTP 403	I learned that an OAuth token alone is not enough; the identity also needs permission on the DCR	I signed in again, checked Monitoring Metrics Publisher on the DCR, allowed role propagation, and retested
+PowerShell script execution blocked	My system blocked an unsigned local .ps1 script	I used a process-specific PowerShell invocation instead of weakening the execution policy for the whole machine
+DCE/DCR and custom-table mapping confusion	I had to align the stream name, DCR immutable ID, and destination table schema	I corrected the mappings and checked that records actually appeared in Log Analytics
+Historical dates differed from ingestion dates	My backfilled records had recent ingestion timestamps even when they described older days	I used the source event date to calculate historical spending baselines
+Anomaly detection depended on a planted label	I realized filtering IsAnomaly == true would only find spikes already tagged by my generator	I rewrote the query to compare resource spending with a historical average and require both percentage and absolute increases
+AKS provisioning constraints	I encountered resource-provider, VM availability, and regional vCPU quota issues	I investigated supported configurations and quotas before continuing the AKS lab
+Kubernetes inventory and unavailable cluster	When I stopped AKS to control cost, recent monitoring views no longer reflected live activity	I used historical last-seen data and explained that it does not represent current cluster health
+Misleading AKS restart/readiness counts	I found that restart counters are cumulative and that NotReady contains the word Ready	I used restart-counter differences and explicit state comparisons, while documenting limitations after resets
+Power BI query/connection errors	A malformed or truncated Power Query request gave me HTTP 400 errors	I corrected the query request and tested the report visuals again
+Secrets in older Git revisions	I found legacy workspace shared keys in old scripts and a tracked .env file	I regenerated both shared keys, moved current scripts to OAuth, removed the obsolete script and tracked .env, and added .env to .gitignore. I also documented that old Git history remains
+Two local Git project folders	I had a azure-monitor-project - Copy folder with older scripts alongside my newer working repository	I compared script versions and confirmed the active branch and remote before editing the correct folder
 
-### 2. KQL monitoring and detection
 
-The repository keeps **12 standalone queries in one file**: [`kusto-queries/cost-anomaly-detection.kql`](kusto-queries/cost-anomaly-detection.kql). Run **one numbered query at a time** in Log Analytics.
-
-| Query | Analysis |
-|---|---|
-| 1 | Verify synthetic cost ingestion |
-| 2 | Detect resource-level cost anomalies using a historical baseline, not the planted anomaly flag |
-| 3 | Analyze daily spend and observed-day baseline |
-| 4 | Identify highest-spending resources |
-| 5 | Detect off-hours Azure administrative operations using Toronto local time |
-| 6 | Show compliance trends across the sample period |
-| 7 | Summarize noncompliant checks by department |
-| 8 | Identify simulated compliance drift |
-| 9 | Evaluate pod health using the latest observed pod snapshot |
-| 10 | Evaluate node health without misclassifying `NotReady` as `Ready` |
-| 11 | Estimate container restarts using counter differences instead of summing snapshots |
-| 12 | Compare namespace workload distribution (**not** actual AKS cost attribution) |
-
-For synthetic/backfilled cost records, queries use the event-day field (for example, `Date_s`) where available rather than assuming ingestion `TimeGenerated` is the spending date. Some queries use `column_ifexists()` to accommodate known legacy suffixes and DCR-mapped column names. Always confirm the deployed schema.
-
-### 3. Azure Workbook and Power BI
-
-- Updated the Azure Monitor Workbook's multiple monitoring views (five tabs in the current repository documentation).
-- Built **three Power BI report pages**: **Azure Cost Analytics**, **Intune Compliance Analytics**, and **AKS Monitoring**.
-- Used KQL aggregation for cost trends, resource comparisons, compliance rates, failed checks, and historical Kubernetes health.
-- Reworked queries and report connections when schema mismatches or malformed query requests prevented charts from rendering.
-
-The Power BI report was built locally. A `.pbix` file is not assumed to be present in this repository; the README/screenshots can document it until the report artifact is added.
-
-### 4. Alerting and infrastructure
-
-- Configured a **Log Analytics cost-anomaly alert**, using a historical comparison instead of filtering directly on generated `IsAnomaly` labels.
-- Configured an **Action Group** and successfully tested its **email notification**.
-- Set the alert evaluation frequency to **15 minutes** during the lab and left the alert **disabled** after testing to avoid ongoing charges.
-- Kept an **ARM template** for a baseline workspace, storage account, action group, and optional alert. Some operational resources—custom tables, DCR/DCE, diagnostic settings, and AKS—were set up separately and are **not** all provisioned by that template.
-
-**Alert validation boundary:** Testing an Action Group email demonstrates notification delivery; it is **not** the same as proving a cost anomaly triggered a complete, end-to-end alert incident.
-
-## Results and validation
-
-| Area | Observed lab result | Interpretation |
-|---|---|---|
-| Cost ingestion | 210 resource-day records | Successfully tested synthetic cost ingestion and querying |
-| Compliance ingestion | 1,500 generated check records | Tested 10 endpoints, 5 policies, and 30 days of synthetic activity |
-| KQL | 12 queries reviewed/validated | Covers ingestion, cost, activity, compliance, and AKS inventory |
-| Azure Workbook | Monitoring views updated | Interactive Azure-side exploration of the log data |
-| Power BI | 3 report pages completed | Separately visualizes cost, compliance, and AKS health |
-| AKS | Historical pod/node inventory analyzed | Historical data remains queryable; cluster status affects freshness |
-| Notification | Action Group test email received | Confirms the test notification path, not full alert triggering |
-
-These are **observations from the lab**, not guaranteed outputs of a new deployment. Re-running generators can change counts and introduce duplicate records; validate timestamps, event dates, and identifiers before interpreting totals.
-
-## Troubleshooting and engineering decisions
-
-Troubleshooting was a substantial part of this project. These are the problems encountered and the actions taken, rather than generic hypothetical failure scenarios.
-
-| Issue | Diagnosis / investigation | Resolution or learning |
-|---|---|---|
-| **Azure Cost Management CLI errors** | Direct cost queries returned `BadRequest` or were not usable as a dependable input in the lab | Used explicitly labeled **synthetic cost records** to test the monitoring pipeline. Did not misrepresent them as billing exports |
-| **Logs Ingestion API returned HTTP 403** | An authenticated call still requires a valid Azure Monitor token **and** the correct DCR role assignment | Reauthenticated with `az login` (including MFA where needed), checked **Monitoring Metrics Publisher** on the DCR, and allowed for role propagation before retesting |
-| **PowerShell script execution blocked** | Execution policy prevented an unsigned local `.ps1` from running | Used PowerShell 7 with a **process-specific invocation** such as `pwsh -NoProfile -ExecutionPolicy Bypass -File ...`; did not recommend globally weakening policy |
-| **DCE/DCR and custom-table mapping confusion** | Stream names, immutable DCR IDs, and destination table schemas must match exactly | Verified custom tables and stream mappings, used the modern Logs Ingestion API, and checked records in Log Analytics after ingestion |
-| **Historical dates differed from ingestion dates** | Backfilled records can arrive with a recent `TimeGenerated` even when they describe older spending days | Analyzed the source event-day column for daily cost baselines, rather than assuming ingestion time represented the event date |
-| **Anomaly detection depended on a planted label** | Filtering `IsAnomaly == true` only retrieved pre-tagged synthetic spikes | Changed detection to compare each resource's daily spend with its historical baseline and apply percentage/absolute thresholds |
-| **AKS provisioning constraints** | Encountered resource-provider registration, VM-size availability, and regional vCPU quota issues while preparing the Kubernetes lab | Investigated provider availability, compatible compute options, and quotas rather than assuming every region/SKU was usable |
-| **Kubernetes inventory and unavailable cluster** | An AKS cluster may be stopped to control cost; `kubectl` cannot reach an unavailable API server, and recent-data panels can be empty | Distinguished **historical last-seen snapshots** from live state and adjusted analysis accordingly; kept the cluster stopped when not required |
-| **Misleading AKS restart/readiness counts** | Restart values are cumulative counters; counting every snapshot inflates totals. `NotReady` contains the text `Ready` | Used counter deltas and explicit readiness-state comparisons; documented undercount possibilities after resets |
-| **Power BI query/connection errors** | A malformed or truncated Power Query request produced an HTTP 400 response | Corrected the query request and retested report visuals against Log Analytics data |
-| **Secrets in older Git revisions** | Legacy scripts used Log Analytics workspace shared keys, and an `.env` file was tracked | Regenerated **both** workspace shared keys, migrated current scripts to OAuth, staged removal of the obsolete script and tracked `.env`, and added `.env` to `.gitignore`. Older commits still exist unless separately rewritten |
-| **Two local Git project folders** | An older `azure-monitor-project - Copy` directory contained legacy scripts while the active repo had newer DCR/DCE implementations | Compared scripts and verified branch/remote/status before editing, avoiding accidental replacement of the tested versions |
-
-### Practical lessons
-
-- A successful HTTP request is not sufficient evidence of a usable pipeline; **query the destination table and validate counts and field mappings**.
-- Authentication (`OAuth token`) and authorization (`DCR RBAC role`) solve different problems.
-- For historical or synthetic telemetry, distinguish **event time** from **ingestion time**.
-- Alert conditions should derive from data, not merely reuse a label planted by a test generator.
-- Kubernetes metrics must be interpreted as snapshots and counters, especially when a cluster has been stopped.
-- Credentials require both prevention in current code and **rotation after accidental exposure**.
-
-## Reproducing the lab
-
-### Prerequisites
-
+What I learned
+- I learned that a successful HTTP response does not prove the whole pipeline works: I still need to query the destination table and inspect record counts and field mappings.
+- I learned the difference between authentication (an OAuth token proving identity) and authorization (the DCR RBAC role granting permission).
+- I learned to distinguish event time from ingestion time, especially with synthetic or backfilled data.
+- I learned to calculate anomaly conditions from spending data rather than trust a label planted by the generator.
+- I learned to interpret Kubernetes snapshots, cumulative restart counters, and the effects of a stopped cluster carefully.
+- I learned to protect credentials in active code and rotate them if they have been exposed.
+Reproducing the lab
+Prerequisites
 - Azure subscription and permission to create/configure monitoring resources.
-- Azure CLI (`az`), PowerShell 7 (`pwsh`), and Python 3.
-- A Log Analytics workspace plus appropriate **custom tables**, **DCR(s)**, and **DCE/ingestion endpoint**.
-- **Monitoring Metrics Publisher** on the relevant DCR for the identity that runs ingestion.
+- Azure CLI (az), PowerShell 7 (pwsh), and Python 3.
+- A Log Analytics workspace plus appropriate custom tables, DCR(s), and DCE/ingestion endpoint.
+- Monitoring Metrics Publisher on the relevant DCR for the identity that runs ingestion.
 - Azure Monitor / Log Analytics access to run the queries.
 - Optional: AKS with Container Insights; Power BI Desktop for the local report.
+Azure Monitor, Log Analytics ingestion/retention, alerts, AKS, and related resources can incur charges. Review pricing and keep nonessential resources stopped or removed when not in use.
 
-> Azure Monitor, Log Analytics ingestion/retention, alerts, AKS, and related resources can incur charges. Review pricing and keep nonessential resources stopped or removed when not in use.
-
-### 1. Authenticate and inspect the deployment template
-
-```powershell
+1. Authenticate and inspect the deployment template
 az login
 az account show
 az group show --name azure-monitor-project
@@ -183,13 +148,8 @@ az deployment group what-if --resource-group azure-monitor-project --template-fi
 
 # Run deployment only after reviewing what-if and possible resource/cost impacts:
 # az deployment group create --resource-group azure-monitor-project --template-file arm-templates/main.json --parameters notificationEmail="YOUR_EMAIL"
-```
-
-The ARM template is a **partial deployment definition**, not an automated recreation of the entire lab. Review resource names and `disableLocalAuth` behavior for any existing workspace before deploying.
-
-### 2. Run synthetic Intune ingestion
-
-```powershell
+I treat the ARM template as a partial deployment definition, not a one-click recreation of the entire lab. Before deploying, I review resource names, costs, and any disableLocalAuth changes affecting an existing workspace.
+2. Run synthetic Intune ingestion
 python -m pip install requests azure-identity
 
 $env:AZURE_DCE_URI="https://YOUR_DCE.REGION.ingest.monitor.azure.com"
@@ -197,53 +157,26 @@ $env:AZURE_DCR_IMMUTABLE_ID="dcr-YOUR_INTUNE_DCR_ID"
 $env:AZURE_DCR_STREAM_NAME="Custom-IntuneDeviceComplianceRaw"
 
 python scripts/generate_intune_data.py
-```
-
-`DefaultAzureCredential` can use an appropriate signed-in development identity. The DCR stream, mappings, and `IntuneDeviceCompliance_CL` table must match the script's record structure.
-
-### 3. Run synthetic cost ingestion
-
-Set the required ingestion configuration for the **cost** DCR, including its DCE endpoint and the stream `Custom-AzureResourceCostRaw`, according to `scripts/Generate-CostData.ps1`. When running both generators, **switch to the correct DCR immutable ID for each stream**.
-
-```powershell
+For local development, my Python script uses DefaultAzureCredential to obtain a token from an authorized identity. I make sure the DCR stream, column mappings, and IntuneDeviceCompliance_CL table match the records the script sends.
+3. Run synthetic cost ingestion
+For the cost generator, I set the DCE endpoint and select the cost DCR with stream Custom-AzureResourceCostRaw, as required by scripts/Generate-CostData.ps1. I use the matching DCR immutable ID for each generator, because cost and compliance have different streams.
 # Verify local behavior before transmitting anything:
 pwsh -NoProfile -File .\scripts\Generate-CostData.ps1 -DaysToGenerate 30
 
 # Example send (requires valid DCR/DCE configuration and RBAC):
 pwsh -NoProfile -File .\scripts\Generate-CostData.ps1 -DaysToGenerate 30 -BatchSize 100 -Send
-```
-
-If execution policy prevents running the file, review your machine's policy; a locally authorized, process-specific `-ExecutionPolicy Bypass` invocation was used during lab troubleshooting. The generator's synthetic `IsAnomaly` flag is **test ground truth**, not the basis for anomaly detection.
-
-### 4. Verify in Log Analytics
-
-Run each of the 12 KQL examples **individually**. Useful schema checks:
-
-```kusto
+When PowerShell execution policy blocked my script, I used a process-specific execution-policy option rather than changing the machine-wide policy. I keep the generator's synthetic IsAnomaly flag as test ground truth; my anomaly query does not depend on it.
+4. Verify in Log Analytics
+I run each of the 12 KQL examples individually in Log Analytics. To confirm my actual schemas, I use these checks:
 AzureResourceCost_CL | getschema
-```
-
-```kusto
 IntuneDeviceCompliance_CL | getschema
-```
-
-```kusto
 KubePodInventory | getschema
-```
+I then check the record counts, exact table and column names, and event-date range. Data ingestion is asynchronous, so I allow for a delay before deciding a record is missing.
+5. Review and import the Workbook
+I review [`dashboards/workbook.json`](dashboards/workbook.json) and its embedded KQL before importing it into Azure. I check that the queries refer to AzureResourceCost_CL and IntuneDeviceCompliance_CL, rather than older custom table names, and that the cost anomaly query calculates its own baseline.
 
-Check row counts, the actual table/column names, and the event-time range. Ingestion is asynchronous; results may not appear immediately.
-
-### 5. Refresh the Workbook
-
-```powershell
-python scripts/sync_workbook_queries.py --apply
-```
-
-Inspect the updated `dashboards/workbook.json` and re-import it into Azure if needed. Workbook resource IDs may still refer to the original lab environment and must be adapted for another subscription.
-
-## Repository layout
-
-```text
+The repository includes a sync_workbook_queries.py helper, but I inspect its output before using it because a synchronization script can overwrite manually updated workbook queries. Workbook resource IDs may also need to be changed when importing into another subscription.
+Repository layout
 azure-monitor-project/
 ├── arm-templates/
 │   └── main.json                         # Partial infrastructure template
@@ -256,29 +189,23 @@ azure-monitor-project/
 │   ├── generate_intune_data.py            # OAuth-based synthetic Intune ingestion
 │   └── sync_workbook_queries.py           # Workbook query synchronization
 ├── docs/
-│   ├── VALIDATION.md                      # Additional validation instructions
-│   └── VS_CODE_PUSH_GUIDE.md              # Repository / Git workflow notes
+│   ├── screenshots/                       # 41 screenshots of my project
+│   └── Azure Cost, Compliance & AKS Monitoring Architecture.png
 ├── .env.example                           # Placeholder configuration only
 ├── .gitignore                             # Excludes local .env and generated files
 └── README.md
-```
 
-**Screenshots will be organized under `docs/screenshots/` before the final repository push.** The Power BI `.pbix` file and a demo-video link can also be added when prepared; neither is implied to be in this repository today.
+I added 41 project screenshots under [`docs/screenshots/`](docs/screenshots/) to document the workbook, queries, Power BI visuals, AKS, and alert testing. I can add the Power BI .pbix file and a recorded walkthrough separately after checking them for sensitive information.
+Screenshots and demonstration
+My screenshots document ingestion results, cost anomaly queries, Intune compliance, Azure Activity, AKS monitoring, workbook views, three Power BI pages, and the successful Action Group test notification. Before publishing additional screenshots, I check for personal emails, account identifiers, tokens, keys, and other sensitive information.
 
-## Screenshots and demonstration
-
-Planned evidence for the repository includes: the ingestion results/custom tables, the cost anomaly query, Intune compliance analysis, Azure Activity query, AKS monitoring, Workbook views, three Power BI pages, and the successful Action Group test notification. Crop or redact **account identifiers, emails, tokens, subscription details, and other sensitive information** before committing screenshots.
-
-A short walkthrough can demonstrate the architecture, show a synthetic cost spike being detected through KQL, tour the Workbook and Power BI pages, and discuss the security/troubleshooting decisions.
-
-## Security and limitations
-
-- **Historical credential exposure:** Earlier Git revisions contained a Log Analytics workspace shared key. **Both primary and secondary keys were regenerated** during project cleanup. The current scripts use OAuth, but historical Git objects may still contain the *now-invalid* keys. Removing a file in a new commit does not erase Git history.
-- **Environment files:** `.env` is ignored; cleanup removes the tracked `.env` from the current branch. `.env.example` contains configuration placeholders, never live secrets.
-- **Lab data:** Cost and Intune readings are simulated. The project does **not** claim a live Cost Management export pipeline or production Microsoft Intune ingestion.
-- **Operational state:** The AKS cluster may be stopped; historical inventory is not evidence of live current health. Node/pod counts depend on the selected time range.
-- **Alerting:** The Action Group notification was tested. The cost alert was configured then disabled; full end-to-end triggering was not established.
-- **Latency/cost:** A 15-minute alert evaluation interval does not guarantee 15-minute detection. Actual behavior depends on ingestion latency, query windows, permissions, and resource state. No fixed low-cost estimate is promised.
-- **Reproducibility:** DCR/DCE, custom tables, diagnostic settings, AKS, RBAC, and report connections may require manual configuration. The ARM template alone does not reconstruct the complete environment.
-
-See [`docs/VALIDATION.md`](docs/VALIDATION.md) for further checks. This README documents **work completed and observed in the lab**, while making its remaining limitations explicit.
+In a short walkthrough, I can explain the architecture, demonstrate a synthetic cost spike in KQL, show the Workbook and Power BI reports, and discuss the troubleshooting and security decisions.
+Security and limitations
+- Historical credential exposure: Earlier Git revisions contained a Log Analytics workspace shared key. Both primary and secondary keys were regenerated during project cleanup. The current scripts use OAuth, but historical Git objects may still contain the now-invalid keys. Removing a file in a new commit does not erase Git history.
+- Environment files: I removed the tracked .env from the current branch and added it to .gitignore. I keep .env.example only for nonsecret configuration placeholders.
+- Lab data: Cost and Intune readings are simulated. The project does not claim a live Cost Management export pipeline or production Microsoft Intune ingestion.
+- Operational state: The AKS cluster may be stopped; historical inventory is not evidence of live current health. Node/pod counts depend on the selected time range.
+- Alerting: The Action Group notification was tested. The cost alert was configured then disabled; full end-to-end triggering was not established.
+- Latency/cost: A 15-minute alert evaluation interval does not guarantee 15-minute detection. Actual behavior depends on ingestion latency, query windows, permissions, and resource state. No fixed low-cost estimate is promised.
+- Reproducibility: DCR/DCE, custom tables, diagnostic settings, AKS, RBAC, and report connections may require manual configuration. The ARM template alone does not reconstruct the complete environment.
+I document my validation steps and their limitations directly in this README. I have not claimed that the ARM template, scripts, or alert workflow recreate a fully tested production system.
